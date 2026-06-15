@@ -40,6 +40,7 @@ class DaemonHooks:
     run_claude: Callable[..., str]
     has_changes: Callable[[Path], bool]
     ensure_committed_and_pushed_to_fork: Callable[[Path, str], str]
+    create_pr: Callable[[Path, str, str, Config, Path], None]
     download_message_images: Callable[[list[dict[str, Any]], Path], dict[str, str]]
     render_messages_markdown: Callable[[Config, list[dict[str, Any]], dict[str, str] | None], str]
     log: Callable[[str], None]
@@ -56,7 +57,6 @@ def run_daemon_mode(cfg: Config, hooks: DaemonHooks) -> None:
     daemon_cfg = replace(
         cfg,
         count=max(cfg.count, cfg.daemon_trigger_count * max(multiplier for _, multiplier in BUFFER_LEVELS)),
-        no_pr=True,
         claude_timeout_seconds=cfg.daemon_claude_timeout_seconds,
     )
     state = load_daemon_state(state_file, hooks.log)
@@ -204,7 +204,13 @@ def run_daemon_batch(
         raise
 
     if hooks.has_changes(cfg.repo_dir):
-        hooks.ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
+        title = hooks.ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
+        if cfg.no_pr:
+            hooks.log("no-pr：跳过 PR 创建", module="pr")
+        else:
+            hooks.log("开始创建上游 PR", module="pr")
+            hooks.create_pr(cfg.repo_dir, branch, title, cfg, md_path.resolve())
+            hooks.log("PR 创建完成", module="pr")
     else:
         hooks.log("处理完成：无代码改动", module="chat")
     return run_dir
