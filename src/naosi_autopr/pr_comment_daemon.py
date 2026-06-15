@@ -249,6 +249,8 @@ def build_pr_comment_prompt(
         "- Work only in the dedicated local review clone, not in the chat-daemon repo.\n"
         "- Create a local git commit if you make repository changes.\n"
         "- If you create a git commit, push the current branch to the user's fork remote `fork`.\n"
+        "- Treat https://github.com/NAOSI-DLUT/dut-manual as the upstream repository for PR review context and main-branch syncing.\n"
+        "- Treat https://github.com/LangQi99/dut-manual as the user's fork that should receive pushes.\n"
         "- You can also comment to show your insights but must start with [AUTO].\n"
         "- Do not create a PR.\n"
     )

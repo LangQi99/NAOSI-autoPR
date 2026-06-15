@@ -757,6 +757,8 @@ def build_claude_prompt(
         - If you create a git commit, push the current branch to the user's fork remote `fork`.
         - Run the relevant verification command if the repository provides one.
         - Do not create a PR; the outer automation will handle PR creation.
+        - Treat https://github.com/NAOSI-DLUT/dut-manual as the upstream repository for review context and main-branch syncing.
+        - Treat https://github.com/LangQi99/dut-manual as the user's fork that should receive pushes.
 
         Constraints:
         - PR title must be concise and start with [AUTO].
@@ -817,11 +819,11 @@ def ensure_repo(repo_url: str, repo_dir: Path) -> None:
 
 
 def sync_repo(repo_dir: Path) -> None:
-    log("同步仓库", module="git")
+    log("同步上游 main", module="git")
     run_cmd(["git", "fetch", "--all", "--prune"], cwd=repo_dir)
     run_cmd(["git", "checkout", "main"], cwd=repo_dir)
-    run_cmd(["git", "pull", "--ff-only"], cwd=repo_dir)
-    log("仓库同步完成", module="git")
+    run_cmd(["git", "reset", "--hard", "origin/main"], cwd=repo_dir)
+    log("已对齐 origin/main", module="git")
 
 
 def checkout_branch(repo_dir: Path, branch: str) -> None:
