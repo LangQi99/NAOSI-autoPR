@@ -261,12 +261,7 @@ def run(cfg: Config) -> None:
     log("Starting Claude Code.")
     run_claude(cfg, prompt)
     log("Claude Code finished.")
-    if not has_changes(cfg.repo_dir):
-        raise AutoPRError("Claude finished but did not create any repository changes")
-
-    title = build_pr_title(cfg.repo_dir)
-    commit_all(cfg.repo_dir, title)
-    log(f"Committed local changes with title: {title}")
+    title = ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
 
     if cfg.no_pr:
         log("Skipping push and PR creation because --no-pr was set.")
@@ -379,12 +374,7 @@ def run_daemon_batch(
         write_response(response_file, "timeout")
         raise
 
-    if has_changes(cfg.repo_dir):
-        title = build_pr_title(cfg.repo_dir)
-        commit_all(cfg.repo_dir, title)
-        log(f"Daemon committed local changes with title: {title}")
-    else:
-        log("Daemon run finished with no repository changes.")
+    ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
     return run_dir
 
 
@@ -877,21 +867,24 @@ def build_claude_prompt(
         - Edit this repository only where the chat evidence supports a change.
         - Keep changes focused and reviewable.
         - It is acceptable to make no repository changes if the chat does not contain anything clearly valuable enough to document.
+        - If you make repository changes, create a local git commit for them.
+        - If you create a git commit, push the current branch to the user's fork remote `fork`.
         - Run the relevant verification command if the repository provides one.
-        - Do not push or create a PR; the outer automation will handle git and PR creation.
+        - Do not create a PR; the outer automation will handle PR creation.
 
         Constraints:
         - PR title must be concise and start with [AUTO].
         - PR body must mention the automation project: {DEFAULT_PROJECT_URL}
         - Current automation branch name: {branch}
+        - If you commit, keep using the current automation branch `{branch}`.
         - Prefer the smallest correct edit that captures the concrete guidance from the chat.
         - Do not duplicate information that is already documented in the repository.
         - If existing content is inaccurate, prefer correcting it in place instead of writing a parallel rewrite.
         - If the chat export does not contain enough actionable information, create a short markdown note under docs or the closest existing documentation area explaining that no actionable update was found, instead of inventing content.
 
-        Repository-specific hint:
-        Choose the closest existing docs page instead of creating a broad new document.
         Only add content that is directly supported by the chat export.
+        As long as it matches the project, you can add it despite it is not complete and structured.
+        because it can be added for the future.
         """
     ).strip()
 
@@ -957,6 +950,75 @@ def has_changes(repo_dir: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def branch_has_local_commit(repo_dir: Path) -> bool:
+    result = subprocess.run(
+        ["git", "rev-list", "--count", "main..HEAD"],
+        cwd=repo_dir,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return int(result.stdout.strip() or "0") > 0
+
+
+def current_commit_title(repo_dir: Path) -> str:
+    result = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=repo_dir,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def current_branch(repo_dir: Path) -> str:
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo_dir,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def branch_pushed_to_remote(repo_dir: Path, remote: str, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "ls-remote", "--heads", remote, branch],
+        cwd=repo_dir,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return bool(result.stdout.strip())
+
+
+def ensure_committed_and_pushed_to_fork(repo_dir: Path, repo_url: str) -> str:
+    if not has_changes(repo_dir) and not branch_has_local_commit(repo_dir):
+        raise AutoPRError("Claude finished but did not create any repository changes or commit")
+
+    if has_changes(repo_dir):
+        title = build_pr_title(repo_dir)
+        commit_all(repo_dir, title)
+        log(f"Committed local changes with title: {title}")
+    else:
+        title = current_commit_title(repo_dir)
+        log(f"Claude already committed changes with title: {title}")
+
+    branch = current_branch(repo_dir)
+    login = gh_api_text(["user", "--jq", ".login"], repo_dir).strip()
+    if not login:
+        raise AutoPRError("unable to determine authenticated GitHub login")
+    push_remote = ensure_push_remote(repo_dir, repo_url, login)
+    if branch_pushed_to_remote(repo_dir, push_remote, branch):
+        log(f"Branch {branch} is already present on remote {push_remote}.")
+    else:
+        log(f"Branch {branch} is not yet on remote {push_remote}; pushing now.")
+        run_cmd(["git", "push", "-u", push_remote, branch], cwd=repo_dir)
+    return title
+
+
 def build_pr_title(repo_dir: Path) -> str:
     diff_name = subprocess.run(
         ["git", "diff", "--name-only"],
@@ -996,8 +1058,11 @@ def create_pr(repo_dir: Path, branch: str, title: str, cfg: Config, chat_path: P
         raise AutoPRError("unable to determine authenticated GitHub login")
 
     push_remote = ensure_push_remote(repo_dir, cfg.repo_url, login)
-    log(f"Pushing branch {branch} to remote {push_remote}.")
-    run_cmd(["git", "push", "-u", push_remote, branch], cwd=repo_dir)
+    if branch_pushed_to_remote(repo_dir, push_remote, branch):
+        log(f"Branch {branch} is already present on remote {push_remote}; skipping push.")
+    else:
+        log(f"Pushing branch {branch} to remote {push_remote}.")
+        run_cmd(["git", "push", "-u", push_remote, branch], cwd=repo_dir)
 
     upstream_owner, upstream_repo = parse_github_repo(cfg.repo_url)
     body = build_pr_body(cfg, chat_path)
