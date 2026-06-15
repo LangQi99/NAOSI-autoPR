@@ -36,6 +36,7 @@ DEFAULT_DAEMON_CLAUDE_TIMEOUT_SECONDS = 3600
 DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_RESPONSE_FILE = Path("response.txt")
 DEFAULT_RESPONSE_PORT = 6798
+DEFAULT_DAEMON_STATE_FILE = Path("daemon-state.json")
 
 
 class AutoPRError(RuntimeError):
@@ -64,6 +65,7 @@ class Config:
     poll_interval_seconds: int
     response_file: Path
     response_port: int
+    daemon_state_file: Path
 
 
 @dataclass
@@ -167,6 +169,12 @@ def parse_args() -> Config:
         default=int(os.getenv("RESPONSE_PORT", str(DEFAULT_RESPONSE_PORT))),
         help="In daemon mode, serve the response file on this TCP port.",
     )
+    parser.add_argument(
+        "--daemon-state-file",
+        type=Path,
+        default=Path(os.getenv("DAEMON_STATE_FILE", str(DEFAULT_DAEMON_STATE_FILE))),
+        help="In daemon mode, persist seen-message progress and pending buffer to this JSON file.",
+    )
     args = parser.parse_args()
 
     token_hash = args.qq_bot_token_hash
@@ -198,6 +206,7 @@ def parse_args() -> Config:
         poll_interval_seconds=args.poll_interval_seconds,
         response_file=args.response_file,
         response_port=args.response_port,
+        daemon_state_file=args.daemon_state_file,
     )
 
 
@@ -273,6 +282,8 @@ def run_daemon(cfg: Config) -> None:
     response_file.parent.mkdir(parents=True, exist_ok=True)
     write_response(response_file, "idle")
     start_response_server(response_file, cfg.response_port)
+    state_file = cfg.daemon_state_file.resolve()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
 
     daemon_cfg = replace(
         cfg,
@@ -280,12 +291,13 @@ def run_daemon(cfg: Config) -> None:
         no_pr=True,
         claude_timeout_seconds=cfg.daemon_claude_timeout_seconds,
     )
-    state = DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
+    state = load_daemon_state(state_file)
 
     log(
         "Daemon mode started. "
         f"Trigger count={cfg.daemon_trigger_count}, poll interval={cfg.poll_interval_seconds}s, "
-        f"response file={response_file}, response port={cfg.response_port}."
+        f"response file={response_file}, response port={cfg.response_port}, "
+        f"state file={state_file}."
     )
 
     while True:
@@ -294,16 +306,25 @@ def run_daemon(cfg: Config) -> None:
             latest = fetch_group_history(daemon_cfg, credential)
             state.latest_messages = latest
             if not state.initialized:
-                for msg in latest:
+                ordered_latest = sorted(
+                    latest,
+                    key=lambda item: (item.get("time") or 0, item.get("message_id") or 0),
+                )
+                for msg in ordered_latest:
                     state.seen_message_ids.add(message_identity(msg))
+                initial_buffer = ordered_latest[-cfg.daemon_trigger_count :]
+                state.pending_messages = deque(initial_buffer)
                 state.initialized = True
+                persist_daemon_state(state_file, state)
                 write_response(response_file, "waiting")
-                log(f"Daemon baseline established from {len(latest)} existing messages.")
-                time.sleep(cfg.poll_interval_seconds)
-                continue
+                log(
+                    f"Daemon baseline established from {len(latest)} existing messages. "
+                    f"Initial buffer filled with {len(state.pending_messages)} messages."
+                )
             new_messages = collect_new_messages(latest, state)
             if new_messages:
                 state.pending_messages.extend(new_messages)
+                persist_daemon_state(state_file, state)
                 log(
                     f"Daemon observed {len(new_messages)} new messages. "
                     f"Pending trigger buffer={len(state.pending_messages)}."
@@ -313,6 +334,7 @@ def run_daemon(cfg: Config) -> None:
                 run_dir = run_daemon_batch(daemon_cfg, batch, state.latest_messages, response_file)
                 state.latest_run_dir = run_dir
                 state.pending_messages.clear()
+                persist_daemon_state(state_file, state)
             elif not new_messages:
                 write_response(response_file, "waiting")
         except Exception as exc:  # noqa: BLE001
@@ -390,6 +412,45 @@ def message_identity(msg: dict[str, Any]) -> str:
         ensure_ascii=False,
         sort_keys=True,
     )
+
+
+def load_daemon_state(path: Path) -> DaemonState:
+    if not path.exists():
+        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log(f"Failed to read daemon state file {path}: {exc}. Starting from empty state.")
+        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
+
+    seen = data.get("seen_message_ids") or []
+    pending = data.get("pending_messages") or []
+    latest = data.get("latest_messages") or []
+    initialized = bool(data.get("initialized"))
+    latest_run_dir = data.get("latest_run_dir")
+    state = DaemonState(
+        seen_message_ids={str(item) for item in seen},
+        pending_messages=deque(item for item in pending if isinstance(item, dict)),
+        latest_messages=[item for item in latest if isinstance(item, dict)],
+        initialized=initialized,
+        latest_run_dir=Path(latest_run_dir) if latest_run_dir else None,
+    )
+    log(
+        f"Loaded daemon state from {path}: "
+        f"{len(state.seen_message_ids)} seen ids, {len(state.pending_messages)} buffered messages."
+    )
+    return state
+
+
+def persist_daemon_state(path: Path, state: DaemonState) -> None:
+    payload = {
+        "seen_message_ids": sorted(state.seen_message_ids),
+        "pending_messages": list(state.pending_messages),
+        "latest_messages": state.latest_messages,
+        "initialized": state.initialized,
+        "latest_run_dir": str(state.latest_run_dir) if state.latest_run_dir else None,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_response(path: Path, content: str) -> None:

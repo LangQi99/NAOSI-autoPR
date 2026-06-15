@@ -26,6 +26,7 @@ In daemon mode it:
 4. Uses a 1-hour Claude timeout by default in daemon mode.
 5. Overwrites `response.txt` with the latest Claude output.
 6. Serves that file over HTTP on port `6798`.
+7. Persists daemon progress and the pending message buffer to `daemon-state.json`, so restarts can resume without rebuilding the buffer from zero.
 
 Typical usage:
 
@@ -73,6 +74,7 @@ Useful flags:
 - `--poll-interval-seconds 30`: in daemon mode, poll for new messages every 30 seconds.
 - `--response-file response.txt`: in daemon mode, overwrite this file with Claude output.
 - `--response-port 6798`: in daemon mode, serve the response file over HTTP.
+- `--daemon-state-file daemon-state.json`: in daemon mode, persist seen-message progress and the buffered messages across restarts.
 
 ## Environment variables
 
@@ -94,6 +96,7 @@ Useful flags:
 - `POLL_INTERVAL_SECONDS`
 - `RESPONSE_FILE`
 - `RESPONSE_PORT`
+- `DAEMON_STATE_FILE`
 
 ## Notes
 

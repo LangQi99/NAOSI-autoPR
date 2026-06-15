@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 runs/
 repos/
+response.txt
+daemon-state.json
