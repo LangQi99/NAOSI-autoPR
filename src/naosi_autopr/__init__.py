@@ -729,6 +729,7 @@ def build_claude_prompt(
     branch: str,
     messages: list[dict[str, Any]],
     previous_chat_path: Path | None = None,
+    granularity: str = "1x",
 ) -> str:
     previous_chat_instruction = ""
     if previous_chat_path is not None:
@@ -745,6 +746,9 @@ def build_claude_prompt(
 
         Use the QQ group chat export at:
         {chat_path}
+
+        Current daemon summary granularity: {granularity}.
+        Larger granularities contain broader chat windows and should prioritize cross-message themes, repeated requests, and higher-confidence documentation updates.
 
         Task:
         - Read the chat export and identify concrete documentation updates requested or implied by the group discussion.

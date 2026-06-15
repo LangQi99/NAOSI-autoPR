@@ -13,11 +13,17 @@ from typing import Any, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from . import Config
 
+BUFFER_LEVELS = (
+    ("1x", 1),
+    ("4x", 4),
+    ("16x", 16),
+)
+
 
 @dataclass
 class DaemonState:
     seen_message_ids: set[str]
-    pending_messages: deque[dict[str, Any]]
+    pending_buffers: dict[str, deque[dict[str, Any]]]
     latest_messages: list[dict[str, Any]]
     initialized: bool = False
     latest_run_dir: Path | None = None
@@ -30,7 +36,7 @@ class DaemonHooks:
     ensure_repo: Callable[[str, Path], None]
     sync_repo: Callable[[Path], None]
     checkout_branch: Callable[[Path, str], None]
-    build_claude_prompt: Callable[[Config, Path, str, list[dict[str, Any]], Path | None], str]
+    build_claude_prompt: Callable[[Config, Path, str, list[dict[str, Any]], Path | None, str], str]
     run_claude: Callable[..., str]
     has_changes: Callable[[Path], bool]
     ensure_committed_and_pushed_to_fork: Callable[[Path, str], str]
@@ -49,7 +55,7 @@ def run_daemon_mode(cfg: Config, hooks: DaemonHooks) -> None:
 
     daemon_cfg = replace(
         cfg,
-        count=max(cfg.count, cfg.daemon_trigger_count),
+        count=max(cfg.count, cfg.daemon_trigger_count * max(multiplier for _, multiplier in BUFFER_LEVELS)),
         no_pr=True,
         claude_timeout_seconds=cfg.daemon_claude_timeout_seconds,
     )
@@ -67,48 +73,80 @@ def run_daemon_mode(cfg: Config, hooks: DaemonHooks) -> None:
             latest = hooks.fetch_group_history(daemon_cfg, credential)
             state.latest_messages = latest
             if not state.initialized:
-                ordered_latest = sorted(
-                    latest,
-                    key=lambda item: (item.get("time") or 0, item.get("message_id") or 0),
-                )
-                for msg in ordered_latest:
-                    state.seen_message_ids.add(message_identity(msg))
-                initial_buffer = ordered_latest[-cfg.daemon_trigger_count :]
-                state.pending_messages = deque(initial_buffer)
                 state.initialized = True
                 persist_daemon_state(state_file, state)
-                write_response(response_file, "waiting")
                 hooks.log(
-                    f"首启基线完成：历史={len(latest)} buffer={len(state.pending_messages)}",
+                    f"首启回测：历史={len(latest)} trigger={cfg.daemon_trigger_count}",
                     module="chat",
                 )
             new_messages = collect_new_messages(latest, state)
             if new_messages:
-                state.pending_messages.extend(new_messages)
                 persist_daemon_state(state_file, state)
                 hooks.log(
-                    f"新消息：+{len(new_messages)} buffer={len(state.pending_messages)}",
+                    f"新消息：+{len(new_messages)} buffers={format_buffer_sizes(state)}",
                     module="chat",
                 )
-            if len(state.pending_messages) >= cfg.daemon_trigger_count:
-                batch = list(state.pending_messages)[-cfg.daemon_trigger_count :]
-                run_dir = run_daemon_batch(
+                replay_daemon_messages(
                     daemon_cfg,
-                    batch,
-                    state.latest_messages,
+                    new_messages,
+                    state,
+                    state_file,
                     response_file,
                     hooks,
                 )
-                state.latest_run_dir = run_dir
-                state.pending_messages.clear()
-                persist_daemon_state(state_file, state)
-            elif not new_messages:
-                hooks.log(f"无新消息：buffer={len(state.pending_messages)}", module="chat")
+            elif run_ready_daemon_buffers(daemon_cfg, state, state_file, response_file, hooks):
+                pass
+            else:
+                hooks.log(f"无新消息：buffers={format_buffer_sizes(state)}", module="chat")
                 write_response(response_file, "waiting")
         except Exception as exc:  # noqa: BLE001
             write_response(response_file, f"error\n{exc}")
             hooks.log(f"守护进程异常：{exc}", module="chat")
         time.sleep(cfg.poll_interval_seconds)
+
+
+def replay_daemon_messages(
+    cfg: Config,
+    messages: list[dict[str, Any]],
+    state: DaemonState,
+    state_file: Path,
+    response_file: Path,
+    hooks: DaemonHooks,
+) -> None:
+    for msg in messages:
+        for label, _ in BUFFER_LEVELS:
+            state.pending_buffers.setdefault(label, deque()).append(msg)
+        persist_daemon_state(state_file, state)
+        run_ready_daemon_buffers(cfg, state, state_file, response_file, hooks)
+
+
+def run_ready_daemon_buffers(
+    cfg: Config,
+    state: DaemonState,
+    state_file: Path,
+    response_file: Path,
+    hooks: DaemonHooks,
+) -> bool:
+    did_run = False
+    for label, multiplier in BUFFER_LEVELS:
+        threshold = cfg.daemon_trigger_count * multiplier
+        buffer = state.pending_buffers.setdefault(label, deque())
+        while len(buffer) >= threshold:
+            batch = list(buffer)[:threshold]
+            run_dir = run_daemon_batch(
+                cfg,
+                batch,
+                state.latest_messages,
+                response_file,
+                hooks,
+                granularity=label,
+            )
+            state.latest_run_dir = run_dir
+            for _ in range(threshold):
+                buffer.popleft()
+            persist_daemon_state(state_file, state)
+            did_run = True
+    return did_run
 
 
 def run_daemon_batch(
@@ -117,12 +155,17 @@ def run_daemon_batch(
     latest_messages: list[dict[str, Any]],
     response_file: Path,
     hooks: DaemonHooks,
+    *,
+    granularity: str,
 ) -> Path:
-    run_id = time.strftime("%Y%m%d-%H%M%S")
+    run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{granularity}-{time.time_ns()}"
     run_dir = cfg.out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     write_response(response_file, "running")
-    hooks.log(f"触发处理：run={run_id} messages={len(trigger_messages)}", module="chat")
+    hooks.log(
+        f"触发处理：run={run_id} granularity={granularity} messages={len(trigger_messages)}",
+        module="chat",
+    )
 
     image_dir = run_dir / "images"
     image_map = hooks.download_message_images(trigger_messages, image_dir)
@@ -137,7 +180,14 @@ def run_daemon_batch(
     hooks.checkout_branch(cfg.repo_dir, branch)
 
     previous_chat_path = find_previous_chat_export(cfg.out_dir, run_dir)
-    prompt = hooks.build_claude_prompt(cfg, md_path.resolve(), branch, trigger_messages, previous_chat_path)
+    prompt = hooks.build_claude_prompt(
+        cfg,
+        md_path.resolve(),
+        branch,
+        trigger_messages,
+        previous_chat_path,
+        granularity,
+    )
     prompt_path = run_dir / "claude-prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
 
@@ -188,27 +238,27 @@ def message_identity(msg: dict[str, Any]) -> str:
 
 def load_daemon_state(path: Path, log: Callable[[str], None]) -> DaemonState:
     if not path.exists():
-        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
+        return DaemonState(seen_message_ids=set(), pending_buffers=empty_pending_buffers(), latest_messages=[])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         log(f"状态文件读取失败：{path}，将从空状态启动", module="chat")
-        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
+        return DaemonState(seen_message_ids=set(), pending_buffers=empty_pending_buffers(), latest_messages=[])
 
     seen = data.get("seen_message_ids") or []
-    pending = data.get("pending_messages") or []
+    pending_buffers = load_pending_buffers(data)
     latest = data.get("latest_messages") or []
     initialized = bool(data.get("initialized"))
     latest_run_dir = data.get("latest_run_dir")
     state = DaemonState(
         seen_message_ids={str(item) for item in seen},
-        pending_messages=deque(item for item in pending if isinstance(item, dict)),
+        pending_buffers=pending_buffers,
         latest_messages=[item for item in latest if isinstance(item, dict)],
         initialized=initialized,
         latest_run_dir=Path(latest_run_dir) if latest_run_dir else None,
     )
     log(
-        f"已加载状态：seen={len(state.seen_message_ids)} buffer={len(state.pending_messages)}",
+        f"已加载状态：seen={len(state.seen_message_ids)} buffers={format_buffer_sizes(state)}",
         module="chat",
     )
     return state
@@ -217,12 +267,40 @@ def load_daemon_state(path: Path, log: Callable[[str], None]) -> DaemonState:
 def persist_daemon_state(path: Path, state: DaemonState) -> None:
     payload = {
         "seen_message_ids": sorted(state.seen_message_ids),
-        "pending_messages": list(state.pending_messages),
+        "pending_buffers": {
+            label: list(state.pending_buffers.get(label, deque()))
+            for label, _ in BUFFER_LEVELS
+        },
         "latest_messages": state.latest_messages,
         "initialized": state.initialized,
         "latest_run_dir": str(state.latest_run_dir) if state.latest_run_dir else None,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def empty_pending_buffers() -> dict[str, deque[dict[str, Any]]]:
+    return {label: deque() for label, _ in BUFFER_LEVELS}
+
+
+def load_pending_buffers(data: dict[str, Any]) -> dict[str, deque[dict[str, Any]]]:
+    buffers = empty_pending_buffers()
+    raw_buffers = data.get("pending_buffers")
+    if isinstance(raw_buffers, dict):
+        for label, _ in BUFFER_LEVELS:
+            raw_messages = raw_buffers.get(label) or []
+            buffers[label] = deque(item for item in raw_messages if isinstance(item, dict))
+        return buffers
+
+    raw_legacy_messages = data.get("pending_messages") or []
+    buffers["1x"] = deque(item for item in raw_legacy_messages if isinstance(item, dict))
+    return buffers
+
+
+def format_buffer_sizes(state: DaemonState) -> str:
+    return ",".join(
+        f"{label}={len(state.pending_buffers.get(label, deque()))}"
+        for label, _ in BUFFER_LEVELS
+    )
 
 
 def write_response(path: Path, content: str) -> None:
