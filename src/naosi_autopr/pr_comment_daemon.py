@@ -104,21 +104,9 @@ def collect_new_comment_events(
     seen_ids = set(state.setdefault("seen_comment_ids", []))
     for pr in prs:
         pr_number = int(pr["number"])
-        issue_comments = gh_api_json(f"repos/{repo}/issues/{pr_number}/comments")
         review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
         review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
         resolved_review_comment_ids = get_resolved_review_comment_ids(repo, pr_number)
-        for comment in issue_comments:
-            comment_id = f"issue:{comment['id']}"
-            if comment_id in seen_ids or is_ignorable_comment(comment):
-                continue
-            events.append(
-                {
-                    "pr": pr,
-                    "comment_type": "issue_comment",
-                    "comment": comment,
-                }
-            )
         for review in review_comments:
             review_body = (review.get("body") or "").strip()
             if not review_body:
@@ -306,8 +294,6 @@ def mark_events_seen(state: dict[str, Any], events: list[dict[str, Any]]) -> Non
 def event_identity(event: dict[str, Any]) -> str:
     comment = event.get("comment") or {}
     comment_type = str(event.get("comment_type") or "")
-    if comment_type == "issue_comment":
-        return f"issue:{comment['id']}"
     if comment_type == "review":
         return f"review:{comment['id']}"
     if comment_type == "review_comment":
@@ -566,16 +552,8 @@ def initialize_seen_comments(
     seen_ids = set(state.setdefault("seen_comment_ids", []))
     for pr in prs:
         pr_number = int(pr["number"])
-        issue_comments = gh_api_json(f"repos/{repo}/issues/{pr_number}/comments")
         review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
         review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
-        for comment in issue_comments:
-            comment_id = f"issue:{comment['id']}"
-            if is_ignorable_comment(comment):
-                continue
-            if comment_id not in seen_ids:
-                state["seen_comment_ids"].append(comment_id)
-                seen_ids.add(comment_id)
         for review in review_comments:
             review_body = (review.get("body") or "").strip()
             if not review_body:
