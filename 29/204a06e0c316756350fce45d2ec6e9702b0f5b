@@ -1,0 +1,35 @@
+src/naosi_autopr/__init__.py
+  s_4d1da4e81ad0eb::t_4544c230919910 886
+  s_7662b3ea9ec5a4::t_8e0d22ae60df60 887
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "29204a06e0c316756350fce45d2ec6e9702b0f5b",
+  "prompts": {},
+  "humans": {
+    "h_70d977c6323fbc": {
+      "author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_4d1da4e81ad0eb": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-7a07eaf8-0ae0-449d-bf86-346e0f41c4a7",
+        "model": "default"
+      },
+      "human_author": "LangQi99 <2032771946@qq.com>"
+    },
+    "s_7662b3ea9ec5a4": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-6c7f748f-769b-46e4-bcd8-8e35032d336f",
+        "model": "default"
+      },
+      "human_author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
