@@ -14,6 +14,33 @@ This project exports QQ group chat history from NapCat, saves the history to dis
 
 The Claude step includes a repository-specific hint generator and a timeout so the automation does not hang indefinitely on weak chat context.
 
+## Daemon mode
+
+`naosi-autopr --daemon` runs continuously instead of exiting after one batch.
+
+In daemon mode it:
+
+1. Polls the QQ group regularly.
+2. Tracks newly observed messages.
+3. Triggers a Claude run whenever `80` new messages have accumulated.
+4. Uses a 1-hour Claude timeout by default in daemon mode.
+5. Overwrites `response.txt` with the latest Claude output.
+6. Serves that file over HTTP on port `6798`.
+
+Typical usage:
+
+```bash
+set -a
+source .env
+set +a
+uv run naosi-autopr --daemon
+```
+
+Then read the latest response from:
+
+- local file: `response.txt`
+- HTTP: `http://127.0.0.1:6798/`
+
 ## Current environment assumptions
 
 - The NapCat WebUI used for authentication must be reachable from the machine running this tool.
@@ -40,6 +67,12 @@ Useful flags:
 - `--no-pr`: run Claude and commit locally, but skip `git push` and `gh pr create`.
 - `--count 120`: control how many history messages to request.
 - `--repo-dir repos/dut-manual`: override the target checkout location.
+- `--claude-timeout-seconds 1800`: allow Claude up to 30 minutes before the run aborts.
+- `--daemon-trigger-count 80`: in daemon mode, trigger after 80 newly observed messages.
+- `--daemon-claude-timeout-seconds 3600`: in daemon mode, allow Claude up to 1 hour.
+- `--poll-interval-seconds 30`: in daemon mode, poll for new messages every 30 seconds.
+- `--response-file response.txt`: in daemon mode, overwrite this file with Claude output.
+- `--response-port 6798`: in daemon mode, serve the response file over HTTP.
 
 ## Environment variables
 
@@ -55,6 +88,12 @@ Useful flags:
 - `OUT_DIR`
 - `BRANCH_PREFIX`
 - `CLAUDE_BUDGET_USD`
+- `CLAUDE_TIMEOUT_SECONDS`
+- `DAEMON_TRIGGER_COUNT`
+- `DAEMON_CLAUDE_TIMEOUT_SECONDS`
+- `POLL_INTERVAL_SECONDS`
+- `RESPONSE_FILE`
+- `RESPONSE_PORT`
 
 ## Notes
 
