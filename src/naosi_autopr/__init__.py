@@ -90,6 +90,9 @@ def main() -> None:
             run_daemon(cfg)
         else:
             run(cfg)
+    except KeyboardInterrupt:
+        log("收到停止信号，退出", module="run")
+        raise SystemExit(130) from None
     except AutoPRError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -778,7 +781,9 @@ def run_claude(
     *,
     capture_output: bool = False,
     response_file: Path | None = None,
+    repo_dir: Path | None = None,
 ) -> str:
+    effective_repo_dir = (repo_dir or cfg.repo_dir).resolve()
     cmd = [
         "claude",
         "-p",
@@ -786,22 +791,21 @@ def run_claude(
         "--permission-mode",
         "bypassPermissions",
         "--add-dir",
-        str(cfg.repo_dir.resolve()),
+        str(effective_repo_dir),
     ]
     if cfg.claude_budget_usd:
         cmd.extend(["--max-budget-usd", cfg.claude_budget_usd])
-    prompt_preview = single_line(prompt, 160)
-    log(f"执行 claude -p {prompt_preview}", module="claude")
-    log(f"Claude 工作目录：{cfg.repo_dir.resolve()}", module="claude")
+    log(f"执行 claude -p {single_line(prompt, 1000000)}", module="claude")
+    log(f"Claude 工作目录：{effective_repo_dir}", module="claude")
     log(f"Claude 超时：{cfg.claude_timeout_seconds}s", module="claude")
     if capture_output:
         return run_cmd_capture(
             cmd,
-            cwd=cfg.repo_dir,
+            cwd=effective_repo_dir,
             timeout=cfg.claude_timeout_seconds,
             response_file=response_file,
         )
-    run_cmd(cmd, cwd=cfg.repo_dir, timeout=cfg.claude_timeout_seconds)
+    run_cmd(cmd, cwd=effective_repo_dir, timeout=cfg.claude_timeout_seconds)
     return ""
 
 
@@ -821,7 +825,13 @@ def sync_repo(repo_dir: Path) -> None:
 
 
 def checkout_branch(repo_dir: Path, branch: str) -> None:
-    run_cmd(["git", "checkout", "-B", branch], cwd=repo_dir)
+    try:
+        run_cmd(["git", "checkout", "-B", branch], cwd=repo_dir)
+    except subprocess.CalledProcessError:
+        log(f"checkout失败：清理工作区后重试 branch={branch}", module="git")
+        run_cmd(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
+        run_cmd(["git", "clean", "-fd"], cwd=repo_dir)
+        run_cmd(["git", "checkout", "-B", branch], cwd=repo_dir)
 
 
 def has_changes(repo_dir: Path) -> bool:
@@ -973,11 +983,11 @@ def create_pr(repo_dir: Path, branch: str, title: str, cfg: Config, chat_path: P
 def build_pr_body(cfg: Config, chat_path: Path) -> str:
     return textwrap.dedent(
         f"""
-        Generated from QQ group `{cfg.group_id}` chat history.
+        由 QQ 群 `{cfg.group_id}` 的聊天记录自动生成。
 
-        Chat export used by automation: `{chat_path}`
+        自动化使用的聊天记录导出文件：`{chat_path}`
 
-        Source automation project: {DEFAULT_PROJECT_URL}
+        自动化项目来源：{DEFAULT_PROJECT_URL}
         """
     ).strip()
 
@@ -1049,7 +1059,7 @@ def gh_api_json(args: list[str], cwd: Path) -> dict[str, Any]:
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) -> None:
-    log(f"执行命令：{format_cmd(cmd)}", module="cmd")
+    log(f"执行命令：{format_cmd(cmd, full_for_claude=True)}", module="cmd")
     subprocess.run(cmd, cwd=cwd, check=True, timeout=timeout)
 
 
@@ -1059,7 +1069,7 @@ def run_cmd_capture(
     timeout: int | None = None,
     response_file: Path | None = None,
 ) -> str:
-    log(f"执行命令：{format_cmd(cmd)}", module="cmd")
+    log(f"执行命令：{format_cmd(cmd, full_for_claude=True)}", module="cmd")
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -1098,9 +1108,39 @@ def run_cmd_capture(
     return "".join(chunks)
 
 
+def write_response(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
 def log(message: str, module: str = "core") -> None:
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"[naosi-autopr][{module}][{now}] {message}", flush=True)
+    if sys.stdout.isatty():
+        reset = "\033[0m"
+        app_color = "\033[1;36m"
+        time_color = "\033[2;37m"
+        module_colors = {
+            "chat": "\033[1;32m",
+            "pr-comment": "\033[1;35m",
+            "claude": "\033[1;33m",
+            "git": "\033[1;34m",
+            "net": "\033[1;36m",
+            "cmd": "\033[0;37m",
+            "pr": "\033[1;31m",
+            "run": "\033[1;97m",
+            "launcher": "\033[1;95m",
+            "core": "\033[1;97m",
+        }
+        module_color = module_colors.get(module, "\033[1;97m")
+        line = (
+            f"{time_color}[{now}]{reset}"
+            f"{app_color}[naosi-autopr]{reset}"
+            f"{module_color}[{module}]{reset}"
+            " "
+            f"{module_color}{message}{reset}"
+        )
+        print(line, flush=True)
+        return
+    print(f"[{now}][naosi-autopr][{module}] {message}", flush=True)
 
 
 def single_line(text: str, limit: int = 120) -> str:
@@ -1110,7 +1150,9 @@ def single_line(text: str, limit: int = 120) -> str:
     return compact[: limit - 3] + "..."
 
 
-def format_cmd(cmd: list[str], limit: int = 200) -> str:
+def format_cmd(cmd: list[str], limit: int = 200, full_for_claude: bool = False) -> str:
+    if full_for_claude and len(cmd) >= 2 and cmd[0] == "claude" and cmd[1] == "-p":
+        return single_line(" ".join(cmd), 1000000)
     return single_line(" ".join(cmd), limit)
 
 

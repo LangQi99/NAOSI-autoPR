@@ -9,6 +9,8 @@ from typing import Any, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from . import Config
 
+MAX_COMMENT_BODY_LENGTH = 4000
+
 
 @dataclass(frozen=True)
 class PRCommentHooks:
@@ -37,6 +39,7 @@ def run_pr_comment_daemon_mode(cfg: Config, hooks: PRCommentHooks) -> None:
 
     while True:
         try:
+            hooks.ensure_repo(cfg.pr_comment_target_repo_url, cfg.pr_comment_local_repo)
             viewer_login = get_authenticated_login(cfg.pr_comment_local_repo, hooks)
             prs = list_open_auto_prs(cfg.pr_comment_repo)
             if not state.get("initialized"):
@@ -46,11 +49,23 @@ def run_pr_comment_daemon_mode(cfg: Config, hooks: PRCommentHooks) -> None:
                 time.sleep(cfg.pr_comment_poll_interval_seconds)
                 continue
             events = collect_new_comment_events(cfg.pr_comment_repo, prs, state)
-            if events:
-                hooks.log(f"新评论：{len(events)}", module="pr-comment")
-                for event in events:
-                    handle_comment_event(cfg, event, response_file, viewer_login, hooks)
-                persist_state(state_file, state)
+            pr_events = group_events_by_pr(events)
+            if pr_events:
+                hooks.log(
+                    f"新评论={len(events)} 涉及PR={len(pr_events)}",
+                    module="pr-comment",
+                )
+                pr_number, selected_events = select_next_pr_events(pr_events)
+                should_mark_seen = handle_pr_events(
+                    cfg,
+                    selected_events,
+                    response_file,
+                    viewer_login,
+                    hooks,
+                )
+                if should_mark_seen:
+                    mark_events_seen(state, selected_events)
+                    persist_state(state_file, state)
             else:
                 hooks.log(f"无新评论：open_pr={len(prs)}", module="pr-comment")
                 write_text(response_file, "waiting")
@@ -91,12 +106,12 @@ def collect_new_comment_events(
         pr_number = int(pr["number"])
         issue_comments = gh_api_json(f"repos/{repo}/issues/{pr_number}/comments")
         review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
+        review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
+        resolved_review_comment_ids = get_resolved_review_comment_ids(repo, pr_number)
         for comment in issue_comments:
             comment_id = f"issue:{comment['id']}"
             if comment_id in seen_ids or is_ignorable_comment(comment):
                 continue
-            state["seen_comment_ids"].append(comment_id)
-            seen_ids.add(comment_id)
             events.append(
                 {
                     "pr": pr,
@@ -111,8 +126,6 @@ def collect_new_comment_events(
             review_id = f"review:{review['id']}"
             if review_id in seen_ids or is_ignorable_comment(review):
                 continue
-            state["seen_comment_ids"].append(review_id)
-            seen_ids.add(review_id)
             events.append(
                 {
                     "pr": pr,
@@ -120,38 +133,56 @@ def collect_new_comment_events(
                     "comment": review,
                 }
             )
+        for comment in review_line_comments:
+            comment_id = f"review-comment:{comment['id']}"
+            if comment_id in seen_ids or is_ignorable_comment(comment):
+                continue
+            if int(comment["id"]) in resolved_review_comment_ids:
+                continue
+            events.append(
+                {
+                    "pr": pr,
+                    "comment_type": "review_comment",
+                    "comment": comment,
+                }
+            )
     return events
 
 
-def handle_comment_event(
+def handle_pr_events(
     cfg: Config,
-    event: dict[str, Any],
+    events: list[dict[str, Any]],
     response_file: Path,
     viewer_login: str,
     hooks: PRCommentHooks,
-) -> None:
-    pr = event["pr"]
-    comment = event["comment"]
+) -> bool:
+    if not events:
+        return False
+    pr = events[0]["pr"]
     head_owner = str(pr.get("headRepositoryOwner", {}).get("login") or "")
     head_branch = str(pr.get("headRefName") or "").strip()
     if not head_branch:
         hooks.log(f"跳过 PR#{pr['number']}：缺少 head 分支", module="pr-comment")
-        return
+        return True
     if head_owner and head_owner != viewer_login:
         hooks.log(
             f"跳过 PR#{pr['number']}：head 属于 {head_owner}，当前用户={viewer_login}",
             module="pr-comment",
         )
-        return
+        return True
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run_dir = cfg.out_dir / f"pr-comment-{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     pr_url = str(pr["url"])
     pr_body = str(pr.get("body") or "").strip()
-    comment_body = str(comment.get("body") or "").strip()
     desc_path = run_dir / "pr-context.md"
-    prompt = build_pr_comment_prompt(cfg, pr_url, pr_body, comment_body)
+    prompt = build_pr_comment_prompt(
+        cfg,
+        pr_url,
+        pr_body,
+        events,
+    )
     desc_path.write_text(prompt, encoding="utf-8")
 
     repo_url = cfg.pr_comment_target_repo_url
@@ -161,7 +192,7 @@ def handle_comment_event(
 
     write_text(response_file, "running")
     hooks.log(
-        f"处理评论：PR#{pr['number']} branch={head_branch}",
+        f"处理评论：PR#{pr['number']} comments={len(events)} branch={head_branch}",
         module="pr-comment",
     )
     response = hooks.run_claude(
@@ -169,35 +200,303 @@ def handle_comment_event(
         prompt,
         capture_output=True,
         response_file=response_file,
+        repo_dir=cfg.pr_comment_local_repo,
     )
     write_text(response_file, response.strip() or "(empty response)")
     hooks.ensure_committed_and_pushed_to_fork(cfg.pr_comment_local_repo, repo_url)
+    resolve_review_threads(cfg, int(pr["number"]), events, hooks)
     hooks.log(
         f"评论处理完成：PR#{pr['number']} Claude返回={truncate_text(response.strip() or '(empty response)')}",
         module="pr-comment",
     )
+    return True
 
 
-def build_pr_comment_prompt(cfg: Config, pr_url: str, pr_body: str, comment_body: str) -> str:
+def build_pr_comment_prompt(
+    cfg: Config,
+    pr_url: str,
+    pr_body: str,
+    events: list[dict[str, Any]],
+) -> str:
+    rendered_comments: list[str] = []
+    for index, event in enumerate(events, start=1):
+        comment = event["comment"]
+        comment_type = str(event.get("comment_type") or "unknown")
+        comment_path = str(comment.get("path") or "").strip()
+        comment_line = comment.get("line") or comment.get("original_line")
+        comment_url = str(comment.get("html_url") or "")
+        comment_body = str(comment.get("body") or "").strip() or "(empty body)"
+        meta_lines = [f"{index}. type: {comment_type}"]
+        if comment_path:
+            meta_lines.append(f"   path: {comment_path}")
+        if isinstance(comment_line, int):
+            meta_lines.append(f"   line: {comment_line}")
+        if comment_url:
+            meta_lines.append(f"   url: {comment_url}")
+        meta_lines.append("   body:")
+        meta_lines.append(f"   {comment_body}")
+        rendered_comments.append("\n".join(meta_lines))
+    comments_block = "\n\n".join(rendered_comments)
     return (
         f"You are working in the repository https://github.com/{cfg.pr_comment_repo}.git.\n\n"
         f"The PR under discussion is:\n{pr_url}\n\n"
         f"PR description:\n{pr_body or '(empty description)'}\n\n"
-        f"New comment to address:\n{comment_body}\n\n"
+        f"New comments to address in this PR batch:\n{comments_block}\n\n"
         "Task:\n"
-        "- Read the PR description and the new comment carefully.\n"
-        "- Make the smallest repository changes necessary to address the comment.\n"
+        "- Read the PR description and all new comments carefully.\n"
+        "- If there are review comments on specific files or lines, inspect those areas first.\n"
+        "- Make the smallest repository changes necessary to address all comments in this batch.\n"
         "- Work only in the dedicated local review clone, not in the chat-daemon repo.\n"
         "- Create a local git commit if you make repository changes.\n"
         "- If you create a git commit, push the current branch to the user's fork remote `fork`.\n"
+        "- You can also comment to show your insights but must start with [AUTO].\n"
         "- Do not create a PR.\n"
     )
+
+
+def group_events_by_pr(events: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for event in events:
+        pr = event.get("pr") or {}
+        pr_number = int(pr.get("number") or 0)
+        grouped.setdefault(pr_number, []).append(event)
+    return grouped
+
+
+def select_next_pr_events(pr_events: dict[int, list[dict[str, Any]]]) -> tuple[int, list[dict[str, Any]]]:
+    ranked = sorted(
+        pr_events.items(),
+        key=lambda item: (
+            earliest_event_time(item[1]),
+            item[0],
+        ),
+    )
+    return ranked[0]
+
+
+def earliest_event_time(events: list[dict[str, Any]]) -> str:
+    values = [
+        event_timestamp(event)
+        for event in events
+        if event_timestamp(event)
+    ]
+    return min(values) if values else ""
+
+
+def event_timestamp(event: dict[str, Any]) -> str:
+    comment = event.get("comment") or {}
+    for key in ("created_at", "submitted_at", "updated_at"):
+        value = str(comment.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def mark_events_seen(state: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    seen_ids = set(state.setdefault("seen_comment_ids", []))
+    for event in events:
+        event_id = event_identity(event)
+        if event_id not in seen_ids:
+            state["seen_comment_ids"].append(event_id)
+            seen_ids.add(event_id)
+
+
+def event_identity(event: dict[str, Any]) -> str:
+    comment = event.get("comment") or {}
+    comment_type = str(event.get("comment_type") or "")
+    if comment_type == "issue_comment":
+        return f"issue:{comment['id']}"
+    if comment_type == "review":
+        return f"review:{comment['id']}"
+    if comment_type == "review_comment":
+        return f"review-comment:{comment['id']}"
+    return f"unknown:{comment.get('id')}"
+
+
+def resolve_review_threads(
+    cfg: Config,
+    pr_number: int,
+    events: list[dict[str, Any]],
+    hooks: PRCommentHooks,
+) -> None:
+    comment_ids = {
+        int((event.get("comment") or {}).get("id"))
+        for event in events
+        if str(event.get("comment_type") or "") == "review_comment"
+        and isinstance((event.get("comment") or {}).get("id"), int)
+    }
+    if not comment_ids:
+        return
+
+    owner, repo = parse_repo_slug(cfg.pr_comment_repo)
+    query = """
+query($owner: String!, $repo: String!, $prNumber: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 100) {
+            nodes {
+              databaseId
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+    try:
+        text = hooks.gh_api_text(
+            [
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"repo={repo}",
+                "-F",
+                f"prNumber={pr_number}",
+            ],
+            cfg.pr_comment_local_repo,
+        )
+        data = json.loads(text)
+    except Exception as exc:  # noqa: BLE001
+        hooks.log(f"网页解决失败：PR#{pr_number} 无法读取 review threads: {exc}", module="pr-comment")
+        return
+
+    threads = (
+        data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    )
+    thread_ids: list[str] = []
+    for thread in threads:
+        if not isinstance(thread, dict) or thread.get("isResolved"):
+            continue
+        comments = ((thread.get("comments") or {}).get("nodes") or [])
+        for comment in comments:
+            database_id = comment.get("databaseId")
+            if isinstance(database_id, int) and database_id in comment_ids:
+                thread_id = str(thread.get("id") or "").strip()
+                if thread_id:
+                    thread_ids.append(thread_id)
+                break
+
+    resolved = 0
+    mutation = """
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread {
+      id
+      isResolved
+    }
+  }
+}
+""".strip()
+    for thread_id in dedupe_preserve(thread_ids):
+        try:
+            hooks.gh_api_text(
+                [
+                    "graphql",
+                    "-f",
+                    f"query={mutation}",
+                    "-F",
+                    f"threadId={thread_id}",
+                ],
+                cfg.pr_comment_local_repo,
+            )
+            resolved += 1
+        except Exception as exc:  # noqa: BLE001
+            hooks.log(f"网页解决失败：thread={thread_id} err={exc}", module="pr-comment")
+    if resolved:
+        hooks.log(f"网页解决完成：PR#{pr_number} threads={resolved}", module="pr-comment")
+
+
+def get_resolved_review_comment_ids(repo: str, pr_number: int) -> set[int]:
+    owner, repo_name = parse_repo_slug(repo)
+    query = """
+query($owner: String!, $repo: String!, $prNumber: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 100) {
+            nodes {
+              databaseId
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+    try:
+        result = gh_graphql(
+            [
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"repo={repo_name}",
+                "-F",
+                f"prNumber={pr_number}",
+            ]
+        )
+    except Exception:
+        return set()
+    nodes = (
+        result.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    )
+    resolved_ids: set[int] = set()
+    for thread in nodes:
+        if not isinstance(thread, dict) or not thread.get("isResolved"):
+            continue
+        comments = ((thread.get("comments") or {}).get("nodes") or [])
+        for comment in comments:
+            database_id = comment.get("databaseId")
+            if isinstance(database_id, int):
+                resolved_ids.add(database_id)
+    return resolved_ids
+
+
+def parse_repo_slug(value: str) -> tuple[str, str]:
+    owner, repo = value.split("/", 1)
+    return owner, repo
+
+
+def dedupe_preserve(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def is_ignorable_comment(comment: dict[str, Any]) -> bool:
     user = comment.get("user") or {}
     login = str(user.get("login") or "")
     if login.endswith("[bot]"):
+        return True
+    body = str(comment.get("body") or "").strip()
+    if body[:6].lower() == "[auto]":
+        return True
+    if len(body) > MAX_COMMENT_BODY_LENGTH:
         return True
     return False
 
@@ -237,6 +536,18 @@ def gh_api_json(path: str) -> list[dict[str, Any]]:
     return json.loads(result.stdout)
 
 
+def gh_graphql(args: list[str]) -> dict[str, Any]:
+    import subprocess
+
+    result = subprocess.run(
+        ["gh", "api", "graphql", *args],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return json.loads(result.stdout)
+
+
 def get_authenticated_login(local_repo: Path, hooks: PRCommentHooks) -> str:
     login = hooks.gh_api_text(["user", "--jq", ".login"], local_repo).strip()
     if not login:
@@ -255,8 +566,11 @@ def initialize_seen_comments(
         pr_number = int(pr["number"])
         issue_comments = gh_api_json(f"repos/{repo}/issues/{pr_number}/comments")
         review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
+        review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
         for comment in issue_comments:
             comment_id = f"issue:{comment['id']}"
+            if is_ignorable_comment(comment):
+                continue
             if comment_id not in seen_ids:
                 state["seen_comment_ids"].append(comment_id)
                 seen_ids.add(comment_id)
@@ -265,9 +579,18 @@ def initialize_seen_comments(
             if not review_body:
                 continue
             review_id = f"review:{review['id']}"
+            if is_ignorable_comment(review):
+                continue
             if review_id not in seen_ids:
                 state["seen_comment_ids"].append(review_id)
                 seen_ids.add(review_id)
+        for comment in review_line_comments:
+            comment_id = f"review-comment:{comment['id']}"
+            if is_ignorable_comment(comment):
+                continue
+            if comment_id not in seen_ids:
+                state["seen_comment_ids"].append(comment_id)
+                seen_ids.add(comment_id)
     state["initialized"] = True
     log(
         f"首启基线完成：open_pr={len(prs)} seen_comments={len(state['seen_comment_ids'])}",
