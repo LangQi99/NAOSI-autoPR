@@ -349,6 +349,7 @@ def run_daemon(cfg: Config) -> None:
         build_claude_prompt=build_claude_prompt,
         run_claude=run_claude,
         has_changes=has_changes,
+        branch_has_local_commit=branch_has_local_commit,
         ensure_committed_and_pushed_to_fork=ensure_committed_and_pushed_to_fork,
         create_pr=create_pr,
         download_message_images=download_message_images,

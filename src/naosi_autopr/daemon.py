@@ -39,6 +39,7 @@ class DaemonHooks:
     build_claude_prompt: Callable[[Config, Path, str, list[dict[str, Any]], Path | None, str], str]
     run_claude: Callable[..., str]
     has_changes: Callable[[Path], bool]
+    branch_has_local_commit: Callable[[Path], bool]
     ensure_committed_and_pushed_to_fork: Callable[[Path, str], str]
     create_pr: Callable[[Path, str, str, Config, Path], None]
     download_message_images: Callable[[list[dict[str, Any]], Path], dict[str, str]]
@@ -203,7 +204,7 @@ def run_daemon_batch(
         hooks.log("处理超时：Claude 未在限制时间内返回", module="chat")
         raise
 
-    if hooks.has_changes(cfg.repo_dir):
+    if hooks.has_changes(cfg.repo_dir) or hooks.branch_has_local_commit(cfg.repo_dir):
         title = hooks.ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
         if cfg.no_pr:
             hooks.log("no-pr：跳过 PR 创建", module="pr")
