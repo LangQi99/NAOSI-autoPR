@@ -18,6 +18,8 @@ BUFFER_LEVELS = (
     ("4x", 4),
     ("16x", 16),
 )
+IMAGE_CACHE_DIR_NAME = "image-cache"
+IMAGE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
 @dataclass
@@ -54,6 +56,7 @@ def run_daemon_mode(cfg: Config, hooks: DaemonHooks) -> None:
     start_response_server(response_file, cfg.response_port, hooks.log)
     state_file = cfg.daemon_state_file.resolve()
     state_file.parent.mkdir(parents=True, exist_ok=True)
+    cleanup_image_cache(image_cache_dir(cfg), hooks.log)
 
     daemon_cfg = replace(
         cfg,
@@ -82,6 +85,8 @@ def run_daemon_mode(cfg: Config, hooks: DaemonHooks) -> None:
                 )
             new_messages = collect_new_messages(latest, state)
             if new_messages:
+                cache_new_message_images(daemon_cfg, new_messages, hooks)
+                cleanup_image_cache(image_cache_dir(daemon_cfg), hooks.log)
                 persist_daemon_state(state_file, state)
                 hooks.log(
                     f"新消息：+{len(new_messages)} buffers={format_buffer_sizes(state)}",
@@ -150,6 +155,12 @@ def run_ready_daemon_buffers(
     return did_run
 
 
+def cache_new_message_images(cfg: Config, messages: list[dict[str, Any]], hooks: DaemonHooks) -> None:
+    cache_dir = image_cache_dir(cfg)
+    for msg in messages:
+        hooks.download_message_images([msg], cache_dir)
+
+
 def run_daemon_batch(
     cfg: Config,
     trigger_messages: list[dict[str, Any]],
@@ -168,7 +179,7 @@ def run_daemon_batch(
         module="chat",
     )
 
-    image_dir = run_dir / "images"
+    image_dir = image_cache_dir(cfg)
     image_map = hooks.download_message_images(trigger_messages, image_dir)
     json_path = run_dir / f"group-{cfg.group_id}.json"
     md_path = run_dir / f"group-{cfg.group_id}.md"
@@ -308,6 +319,28 @@ def format_buffer_sizes(state: DaemonState) -> str:
         f"{label}={len(state.pending_buffers.get(label, deque()))}"
         for label, _ in BUFFER_LEVELS
     )
+
+
+def image_cache_dir(cfg: Config) -> Path:
+    return cfg.out_dir / IMAGE_CACHE_DIR_NAME
+
+
+def cleanup_image_cache(cache_dir: Path, log: Callable[[str], None]) -> None:
+    if not cache_dir.exists():
+        return
+    cutoff = time.time() - IMAGE_RETENTION_SECONDS
+    removed = 0
+    for path in cache_dir.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        log(f"图片缓存清理：removed={removed} retention_days=30", module="chat")
 
 
 def write_response(path: Path, content: str) -> None:
