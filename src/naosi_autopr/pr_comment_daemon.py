@@ -16,7 +16,7 @@ MAX_COMMENT_BODY_LENGTH = 4000
 class PRCommentHooks:
     ensure_repo: Callable[[str, Path], None]
     sync_repo: Callable[[Path], None]
-    checkout_branch: Callable[[Path, str], None]
+    checkout_pr_head: Callable[[Path, str, str, str], None]
     run_claude: Callable[..., str]
     ensure_committed_and_pushed_to_fork: Callable[[Path, str], str]
     gh_api_text: Callable[[list[str], Path], str]
@@ -188,7 +188,7 @@ def handle_pr_events(
     repo_url = cfg.pr_comment_target_repo_url
     hooks.ensure_repo(repo_url, cfg.pr_comment_local_repo)
     hooks.sync_repo(cfg.pr_comment_local_repo)
-    hooks.checkout_branch(cfg.pr_comment_local_repo, head_branch)
+    hooks.checkout_pr_head(cfg.pr_comment_local_repo, repo_url, head_owner, head_branch)
 
     write_text(response_file, "running")
     hooks.log(

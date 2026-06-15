@@ -361,7 +361,7 @@ def run_pr_comment_daemon(cfg: Config) -> None:
     hooks = PRCommentHooks(
         ensure_repo=ensure_repo,
         sync_repo=sync_repo,
-        checkout_branch=checkout_branch,
+        checkout_pr_head=checkout_pr_head,
         run_claude=run_claude,
         ensure_committed_and_pushed_to_fork=ensure_committed_and_pushed_to_fork,
         gh_api_text=gh_api_text,
@@ -834,6 +834,16 @@ def checkout_branch(repo_dir: Path, branch: str) -> None:
         run_cmd(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
         run_cmd(["git", "clean", "-fd"], cwd=repo_dir)
         run_cmd(["git", "checkout", "-B", branch], cwd=repo_dir)
+
+
+def checkout_pr_head(repo_dir: Path, repo_url: str, head_owner: str, head_branch: str) -> None:
+    _, upstream_repo = parse_github_repo(repo_url)
+    head_repo_url = f"https://github.com/{head_owner}/{upstream_repo}.git"
+    log(f"拉取 PR head：{head_owner}:{head_branch}", module="git")
+    run_cmd(["git", "fetch", head_repo_url, head_branch], cwd=repo_dir)
+    run_cmd(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
+    run_cmd(["git", "clean", "-fd"], cwd=repo_dir)
+    run_cmd(["git", "checkout", "-B", head_branch, "FETCH_HEAD"], cwd=repo_dir)
 
 
 def has_changes(repo_dir: Path) -> bool:
