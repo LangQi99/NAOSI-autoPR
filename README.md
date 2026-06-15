@@ -42,6 +42,29 @@ Then read the latest response from:
 - local file: `response.txt`
 - HTTP: `http://127.0.0.1:6798/`
 
+## PR Comment Daemon
+
+`naosi-autopr --pr-comment-daemon` runs a second, isolated daemon for PR feedback handling.
+
+It:
+
+1. Polls open PRs in `NAOSI-DLUT/dut-manual` whose titles start with `[AUTO]`.
+2. Checks for newly arrived issue comments and review bodies every 10 minutes.
+3. Persists seen-comment state so it does not reprocess the same feedback.
+4. Uses a separate local checkout, by default `repos/dut-manual-cr`.
+5. Can point that isolated checkout at a separate Git URL via `PR_COMMENT_TARGET_REPO_URL`.
+6. Lets Claude read the PR URL, PR description, and the new comment, then make changes in that separate checkout.
+7. Writes Claude output to `pr-comment-response.txt`.
+
+Typical usage:
+
+```bash
+set -a
+source .env
+set +a
+uv run naosi-autopr --pr-comment-daemon
+```
+
 ## Current environment assumptions
 
 - The NapCat WebUI used for authentication must be reachable from the machine running this tool.
@@ -75,6 +98,14 @@ Useful flags:
 - `--response-file response.txt`: in daemon mode, overwrite this file with Claude output.
 - `--response-port 6798`: in daemon mode, serve the response file over HTTP.
 - `--daemon-state-file daemon-state.json`: in daemon mode, persist seen-message progress and the buffered messages across restarts.
+- `--pr-comment-daemon`: run the separate PR-comment monitoring daemon.
+- `--pr-comment-repo NAOSI-DLUT/dut-manual`: repository whose open `[AUTO]` PR comments should be monitored.
+- `--pr-comment-local-repo repos/dut-manual-cr`: isolated local checkout used by the PR-comment daemon.
+- `--pr-comment-target-repo-url https://github.com/NAOSI-DLUT/dut-manual.git`: Git URL edited by the PR-comment daemon in that isolated checkout.
+- `--pr-comment-poll-interval-seconds 600`: poll for new PR comments every 10 minutes.
+- `--pr-comment-response-file pr-comment-response.txt`: overwrite with Claude output from the PR-comment daemon.
+- `--pr-comment-state-file pr-comment-state.json`: persist seen PR-comment state across restarts.
+- `--pr-comment-branch-prefix auto/pr-comment`: branch prefix for PR-comment daemon work.
 
 ## Environment variables
 
@@ -97,6 +128,13 @@ Useful flags:
 - `RESPONSE_FILE`
 - `RESPONSE_PORT`
 - `DAEMON_STATE_FILE`
+- `PR_COMMENT_REPO`
+- `PR_COMMENT_LOCAL_REPO`
+- `PR_COMMENT_TARGET_REPO_URL`
+- `PR_COMMENT_POLL_INTERVAL_SECONDS`
+- `PR_COMMENT_RESPONSE_FILE`
+- `PR_COMMENT_STATE_FILE`
+- `PR_COMMENT_BRANCH_PREFIX`
 
 ## Notes
 

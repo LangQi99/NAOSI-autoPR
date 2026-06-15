@@ -4,19 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-if [ ! -d ".venv" ]; then
-  echo "error: .venv not found in $SCRIPT_DIR" >&2
-  exit 1
-fi
+chmod +x "$SCRIPT_DIR/_run_common.sh" "$SCRIPT_DIR/run-chat.sh" "$SCRIPT_DIR/run-pr-comment.sh"
 
-if [ ! -f ".env" ]; then
-  echo "error: .env not found in $SCRIPT_DIR" >&2
-  exit 1
-fi
+"$SCRIPT_DIR/run-chat.sh" &
+CHAT_PID=$!
 
-source ".venv/bin/activate"
-set -a
-source ".env"
-set +a
+"$SCRIPT_DIR/run-pr-comment.sh" &
+PR_COMMENT_PID=$!
 
-exec uv run naosi-autopr --daemon
+wait "$CHAT_PID" "$PR_COMMENT_PID"

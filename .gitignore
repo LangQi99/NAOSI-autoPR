@@ -8,3 +8,5 @@ runs/
 repos/
 response.txt
 daemon-state.json
+pr-comment-response.txt
+pr-comment-state.json

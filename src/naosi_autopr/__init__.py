@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 import hashlib
 import html
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import subprocess
 import sys
 import textwrap
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .daemon import DaemonHooks, run_daemon_mode
+from .pr_comment_daemon import PRCommentHooks, run_pr_comment_daemon_mode
 
 DEFAULT_QQ_BOT_BASE = ""
 DEFAULT_QQ_BOT_TOKEN_HASH = ""
@@ -37,6 +36,13 @@ DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_RESPONSE_FILE = Path("response.txt")
 DEFAULT_RESPONSE_PORT = 6798
 DEFAULT_DAEMON_STATE_FILE = Path("daemon-state.json")
+DEFAULT_PR_COMMENT_REPO = "NAOSI-DLUT/dut-manual"
+DEFAULT_PR_COMMENT_LOCAL_REPO = Path("repos/dut-manual-cr")
+DEFAULT_PR_COMMENT_TARGET_REPO_URL = "https://github.com/NAOSI-DLUT/dut-manual.git"
+DEFAULT_PR_COMMENT_POLL_INTERVAL_SECONDS = 600
+DEFAULT_PR_COMMENT_RESPONSE_FILE = Path("pr-comment-response.txt")
+DEFAULT_PR_COMMENT_STATE_FILE = Path("pr-comment-state.json")
+DEFAULT_PR_COMMENT_BRANCH_PREFIX = "auto/pr-comment"
 
 
 class AutoPRError(RuntimeError):
@@ -66,21 +72,21 @@ class Config:
     response_file: Path
     response_port: int
     daemon_state_file: Path
-
-
-@dataclass
-class DaemonState:
-    seen_message_ids: set[str]
-    pending_messages: deque[dict[str, Any]]
-    latest_messages: list[dict[str, Any]]
-    initialized: bool = False
-    latest_run_dir: Path | None = None
-
+    pr_comment_daemon: bool
+    pr_comment_repo: str
+    pr_comment_local_repo: Path
+    pr_comment_target_repo_url: str
+    pr_comment_poll_interval_seconds: int
+    pr_comment_response_file: Path
+    pr_comment_state_file: Path
+    pr_comment_branch_prefix: str
 
 def main() -> None:
     try:
         cfg = parse_args()
-        if cfg.daemon:
+        if cfg.pr_comment_daemon:
+            run_pr_comment_daemon(cfg)
+        elif cfg.daemon:
             run_daemon(cfg)
         else:
             run(cfg)
@@ -127,6 +133,11 @@ def parse_args() -> Config:
     parser.add_argument("--dry-run", action="store_true", help="Export chat and print the Claude prompt only.")
     parser.add_argument("--no-pr", action="store_true", help="Commit locally but do not push or create a PR.")
     parser.add_argument("--daemon", action="store_true", help="Poll group history continuously and trigger runs automatically.")
+    parser.add_argument(
+        "--pr-comment-daemon",
+        action="store_true",
+        help="Poll open [AUTO] PR comments and let Claude handle new review feedback in a separate repo.",
+    )
     parser.add_argument("--claude-budget-usd", default=os.getenv("CLAUDE_BUDGET_USD"))
     parser.add_argument(
         "--claude-timeout-seconds",
@@ -175,6 +186,52 @@ def parse_args() -> Config:
         default=Path(os.getenv("DAEMON_STATE_FILE", str(DEFAULT_DAEMON_STATE_FILE))),
         help="In daemon mode, persist seen-message progress and pending buffer to this JSON file.",
     )
+    parser.add_argument(
+        "--pr-comment-repo",
+        default=os.getenv("PR_COMMENT_REPO", DEFAULT_PR_COMMENT_REPO),
+        help="GitHub repo in owner/name form whose open [AUTO] PR comments should be monitored.",
+    )
+    parser.add_argument(
+        "--pr-comment-local-repo",
+        type=Path,
+        default=Path(os.getenv("PR_COMMENT_LOCAL_REPO", str(DEFAULT_PR_COMMENT_LOCAL_REPO))),
+        help="Local checkout used by the PR-comment daemon for isolated Claude work.",
+    )
+    parser.add_argument(
+        "--pr-comment-target-repo-url",
+        default=os.getenv("PR_COMMENT_TARGET_REPO_URL", DEFAULT_PR_COMMENT_TARGET_REPO_URL),
+        help="Git URL that the PR-comment daemon edits in its isolated local checkout.",
+    )
+    parser.add_argument(
+        "--pr-comment-poll-interval-seconds",
+        type=int,
+        default=int(
+            os.getenv(
+                "PR_COMMENT_POLL_INTERVAL_SECONDS",
+                str(DEFAULT_PR_COMMENT_POLL_INTERVAL_SECONDS),
+            )
+        ),
+        help="How often the PR-comment daemon checks for new comments. Default: 600 seconds.",
+    )
+    parser.add_argument(
+        "--pr-comment-response-file",
+        type=Path,
+        default=Path(
+            os.getenv("PR_COMMENT_RESPONSE_FILE", str(DEFAULT_PR_COMMENT_RESPONSE_FILE))
+        ),
+        help="Overwrite this file with the latest Claude output from the PR-comment daemon.",
+    )
+    parser.add_argument(
+        "--pr-comment-state-file",
+        type=Path,
+        default=Path(os.getenv("PR_COMMENT_STATE_FILE", str(DEFAULT_PR_COMMENT_STATE_FILE))),
+        help="Persist seen PR-comment state to this JSON file.",
+    )
+    parser.add_argument(
+        "--pr-comment-branch-prefix",
+        default=os.getenv("PR_COMMENT_BRANCH_PREFIX", DEFAULT_PR_COMMENT_BRANCH_PREFIX),
+        help="Branch prefix used by the PR-comment daemon when creating isolated work branches.",
+    )
     args = parser.parse_args()
 
     token_hash = args.qq_bot_token_hash
@@ -207,6 +264,14 @@ def parse_args() -> Config:
         response_file=args.response_file,
         response_port=args.response_port,
         daemon_state_file=args.daemon_state_file,
+        pr_comment_daemon=args.pr_comment_daemon,
+        pr_comment_repo=args.pr_comment_repo,
+        pr_comment_local_repo=args.pr_comment_local_repo,
+        pr_comment_target_repo_url=args.pr_comment_target_repo_url,
+        pr_comment_poll_interval_seconds=args.pr_comment_poll_interval_seconds,
+        pr_comment_response_file=args.pr_comment_response_file,
+        pr_comment_state_file=args.pr_comment_state_file,
+        pr_comment_branch_prefix=args.pr_comment_branch_prefix,
     )
 
 
@@ -214,269 +279,92 @@ def run(cfg: Config) -> None:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = cfg.out_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    log(f"Starting run {run_id}.")
-    log(f"Run artifacts will be written to {run_dir}.")
+    log(f"开始执行：run={run_id}", module="run")
+    log(f"输出目录：{run_dir}", module="run")
 
-    log("Authenticating with NapCat WebUI.")
+    log("认证 NapCat WebUI", module="net")
     credential = login_webui(cfg.qq_bot_base, cfg.qq_bot_token_hash)
-    log("NapCat WebUI authentication succeeded.")
+    log("NapCat WebUI 认证成功", module="net")
 
-    log(f"Preparing target repository at {cfg.repo_dir}.")
+    log(f"准备仓库：{cfg.repo_dir}", module="git")
     ensure_repo(cfg.repo_url, cfg.repo_dir)
     sync_repo(cfg.repo_dir)
 
-    log(f"Fetching group history for {cfg.group_id}.")
+    log(f"拉取群历史：group={cfg.group_id}", module="chat")
     messages = fetch_group_history(cfg, credential)
     if not messages:
         raise AutoPRError("group history returned no messages")
-    log(f"Fetched {len(messages)} messages.")
+    log(f"拉取完成：messages={len(messages)}", module="chat")
 
     image_dir = run_dir / "images"
     image_map = download_message_images(messages, image_dir)
     if image_map:
-        log(f"Downloaded {len(image_map)} images to {image_dir}.")
+        log(f"图片下载完成：count={len(image_map)}", module="chat")
     else:
-        log("No downloadable images were found in the fetched messages.")
+        log("无可下载图片", module="chat")
 
     json_path = run_dir / f"group-{cfg.group_id}.json"
     md_path = run_dir / f"group-{cfg.group_id}.md"
     json_path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(render_messages_markdown(cfg, messages, image_map), encoding="utf-8")
-    log(f"Saved raw history to {json_path}.")
-    log(f"Saved markdown export to {md_path}.")
+    log(f"已写入导出：json={json_path.name} md={md_path.name}", module="chat")
 
     branch = f"{cfg.branch_prefix}-{run_id}"
-    log(f"Checking out working branch {branch}.")
+    log(f"切换分支：{branch}", module="git")
     checkout_branch(cfg.repo_dir, branch)
 
     prompt = build_claude_prompt(cfg, md_path.resolve(), branch, messages)
     prompt_path = run_dir / "claude-prompt.md"
     prompt_path.write_text(prompt, encoding="utf-8")
-    log(f"Saved Claude prompt to {prompt_path}.")
+    log(f"已写入 prompt：{prompt_path.name}", module="claude")
 
     if cfg.dry_run:
-        log("Dry run enabled; stopping before Claude execution.")
+        log("dry-run：停止在 Claude 执行前", module="run")
         return
 
-    log("Starting Claude Code.")
+    log("开始执行 Claude", module="claude")
     run_claude(cfg, prompt)
-    log("Claude Code finished.")
+    log("Claude 执行结束", module="claude")
     title = ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
 
     if cfg.no_pr:
-        log("Skipping push and PR creation because --no-pr was set.")
+        log("no-pr：跳过 PR 创建", module="pr")
         return
 
-    log("Creating upstream PR.")
+    log("开始创建上游 PR", module="pr")
     create_pr(cfg.repo_dir, branch, title, cfg, md_path.resolve())
-    log("PR creation finished.")
+    log("PR 创建完成", module="pr")
 
 
 def run_daemon(cfg: Config) -> None:
-    response_file = cfg.response_file.resolve()
-    response_file.parent.mkdir(parents=True, exist_ok=True)
-    write_response(response_file, "idle")
-    start_response_server(response_file, cfg.response_port)
-    state_file = cfg.daemon_state_file.resolve()
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-
-    daemon_cfg = replace(
-        cfg,
-        count=max(cfg.count, cfg.daemon_trigger_count),
-        no_pr=True,
-        claude_timeout_seconds=cfg.daemon_claude_timeout_seconds,
+    hooks = DaemonHooks(
+        login_webui=login_webui,
+        fetch_group_history=fetch_group_history,
+        ensure_repo=ensure_repo,
+        sync_repo=sync_repo,
+        checkout_branch=checkout_branch,
+        build_claude_prompt=build_claude_prompt,
+        run_claude=run_claude,
+        has_changes=has_changes,
+        ensure_committed_and_pushed_to_fork=ensure_committed_and_pushed_to_fork,
+        download_message_images=download_message_images,
+        render_messages_markdown=render_messages_markdown,
+        log=log,
     )
-    state = load_daemon_state(state_file)
+    run_daemon_mode(cfg, hooks)
 
-    log(
-        "Daemon mode started. "
-        f"Trigger count={cfg.daemon_trigger_count}, poll interval={cfg.poll_interval_seconds}s, "
-        f"response file={response_file}, response port={cfg.response_port}, "
-        f"state file={state_file}."
+
+def run_pr_comment_daemon(cfg: Config) -> None:
+    hooks = PRCommentHooks(
+        ensure_repo=ensure_repo,
+        sync_repo=sync_repo,
+        checkout_branch=checkout_branch,
+        run_claude=run_claude,
+        ensure_committed_and_pushed_to_fork=ensure_committed_and_pushed_to_fork,
+        gh_api_text=gh_api_text,
+        log=log,
     )
-
-    while True:
-        try:
-            credential = login_webui(daemon_cfg.qq_bot_base, daemon_cfg.qq_bot_token_hash)
-            latest = fetch_group_history(daemon_cfg, credential)
-            state.latest_messages = latest
-            if not state.initialized:
-                ordered_latest = sorted(
-                    latest,
-                    key=lambda item: (item.get("time") or 0, item.get("message_id") or 0),
-                )
-                for msg in ordered_latest:
-                    state.seen_message_ids.add(message_identity(msg))
-                initial_buffer = ordered_latest[-cfg.daemon_trigger_count :]
-                state.pending_messages = deque(initial_buffer)
-                state.initialized = True
-                persist_daemon_state(state_file, state)
-                write_response(response_file, "waiting")
-                log(
-                    f"Daemon baseline established from {len(latest)} existing messages. "
-                    f"Initial buffer filled with {len(state.pending_messages)} messages."
-                )
-            new_messages = collect_new_messages(latest, state)
-            if new_messages:
-                state.pending_messages.extend(new_messages)
-                persist_daemon_state(state_file, state)
-                log(
-                    f"Daemon observed {len(new_messages)} new messages. "
-                    f"Pending trigger buffer={len(state.pending_messages)}."
-                )
-            if len(state.pending_messages) >= cfg.daemon_trigger_count:
-                batch = list(state.pending_messages)[-cfg.daemon_trigger_count :]
-                run_dir = run_daemon_batch(daemon_cfg, batch, state.latest_messages, response_file)
-                state.latest_run_dir = run_dir
-                state.pending_messages.clear()
-                persist_daemon_state(state_file, state)
-            elif not new_messages:
-                write_response(response_file, "waiting")
-        except Exception as exc:  # noqa: BLE001
-            write_response(response_file, f"error\n{exc}")
-            log(f"Daemon loop failed: {exc}")
-        time.sleep(cfg.poll_interval_seconds)
-
-
-def run_daemon_batch(
-    cfg: Config,
-    trigger_messages: list[dict[str, Any]],
-    latest_messages: list[dict[str, Any]],
-    response_file: Path,
-) -> Path:
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = cfg.out_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    write_response(response_file, "running")
-    log(f"Daemon triggered run {run_id} from {len(trigger_messages)} new messages.")
-
-    image_dir = run_dir / "images"
-    image_map = download_message_images(trigger_messages, image_dir)
-    json_path = run_dir / f"group-{cfg.group_id}.json"
-    md_path = run_dir / f"group-{cfg.group_id}.md"
-    json_path.write_text(json.dumps(trigger_messages, ensure_ascii=False, indent=2), encoding="utf-8")
-    md_path.write_text(render_messages_markdown(cfg, trigger_messages, image_map), encoding="utf-8")
-
-    branch = f"{cfg.branch_prefix}-{run_id}"
-    ensure_repo(cfg.repo_url, cfg.repo_dir)
-    sync_repo(cfg.repo_dir)
-    checkout_branch(cfg.repo_dir, branch)
-
-    previous_chat_path = find_previous_chat_export(cfg.out_dir, run_dir)
-    prompt = build_claude_prompt(cfg, md_path.resolve(), branch, trigger_messages, previous_chat_path)
-    prompt_path = run_dir / "claude-prompt.md"
-    prompt_path.write_text(prompt, encoding="utf-8")
-
-    try:
-        response = run_claude(cfg, prompt, capture_output=True, response_file=response_file)
-        write_response(response_file, response.strip() or "(empty response)")
-    except subprocess.TimeoutExpired:
-        write_response(response_file, "timeout")
-        raise
-
-    ensure_committed_and_pushed_to_fork(cfg.repo_dir, cfg.repo_url)
-    return run_dir
-
-
-def collect_new_messages(latest: list[dict[str, Any]], state: DaemonState) -> list[dict[str, Any]]:
-    new_messages: list[dict[str, Any]] = []
-    for msg in sorted(latest, key=lambda item: (item.get("time") or 0, item.get("message_id") or 0)):
-        message_key = message_identity(msg)
-        if message_key in state.seen_message_ids:
-            continue
-        state.seen_message_ids.add(message_key)
-        new_messages.append(msg)
-    return new_messages
-
-
-def message_identity(msg: dict[str, Any]) -> str:
-    message_id = msg.get("message_id")
-    if message_id not in (None, ""):
-        return f"id:{message_id}"
-    return json.dumps(
-        {
-            "time": msg.get("time"),
-            "user_id": msg.get("user_id"),
-            "raw_message": msg.get("raw_message"),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
-def load_daemon_state(path: Path) -> DaemonState:
-    if not path.exists():
-        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        log(f"Failed to read daemon state file {path}: {exc}. Starting from empty state.")
-        return DaemonState(seen_message_ids=set(), pending_messages=deque(), latest_messages=[])
-
-    seen = data.get("seen_message_ids") or []
-    pending = data.get("pending_messages") or []
-    latest = data.get("latest_messages") or []
-    initialized = bool(data.get("initialized"))
-    latest_run_dir = data.get("latest_run_dir")
-    state = DaemonState(
-        seen_message_ids={str(item) for item in seen},
-        pending_messages=deque(item for item in pending if isinstance(item, dict)),
-        latest_messages=[item for item in latest if isinstance(item, dict)],
-        initialized=initialized,
-        latest_run_dir=Path(latest_run_dir) if latest_run_dir else None,
-    )
-    log(
-        f"Loaded daemon state from {path}: "
-        f"{len(state.seen_message_ids)} seen ids, {len(state.pending_messages)} buffered messages."
-    )
-    return state
-
-
-def persist_daemon_state(path: Path, state: DaemonState) -> None:
-    payload = {
-        "seen_message_ids": sorted(state.seen_message_ids),
-        "pending_messages": list(state.pending_messages),
-        "latest_messages": state.latest_messages,
-        "initialized": state.initialized,
-        "latest_run_dir": str(state.latest_run_dir) if state.latest_run_dir else None,
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def write_response(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-
-
-def start_response_server(response_file: Path, port: int) -> None:
-    class ResponseHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            body = response_file.read_text(encoding="utf-8") if response_file.exists() else ""
-            payload = body.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, format: str, *args: object) -> None:  # noqa: A003
-            return
-
-    server = ThreadingHTTPServer(("0.0.0.0", port), ResponseHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    log(f"Serving response file on 0.0.0.0:{port}.")
-
-
-def find_previous_chat_export(out_dir: Path, current_run_dir: Path) -> Path | None:
-    candidates = sorted(
-        [path for path in out_dir.iterdir() if path.is_dir() and path.name != current_run_dir.name],
-        reverse=True,
-    )
-    for candidate in candidates:
-        md_files = sorted(candidate.glob("group-*.md"))
-        if md_files:
-            return md_files[0].resolve()
-    return None
+    run_pr_comment_daemon_mode(cfg, hooks)
 
 
 def login_webui(base: str, token_hash: str) -> str:
@@ -495,7 +383,6 @@ def fetch_group_history(cfg: Config, webui_credential: str) -> list[dict[str, An
     if ob11_cfg and not cfg.onebot_base:
         host = urllib.parse.urlparse(cfg.qq_bot_base).hostname or "127.0.0.1"
         discovered = f"http://{host}:{ob11_cfg['port']}"
-        log(f"Using auto-configured OneBot HTTP server at {discovered}.")
         cfg = replace(
             cfg,
             onebot_base=discovered,
@@ -506,13 +393,11 @@ def fetch_group_history(cfg: Config, webui_credential: str) -> list[dict[str, An
     errors: list[str] = []
     for base in bases:
         try:
-            log(f"Trying OneBot history API at {base}.")
             messages = fetch_group_history_from_base(base, cfg, cfg.onebot_token)
             if messages:
-                log(f"Fetched group history from {base}.")
+                log(f"历史拉取成功：source={base} count={len(messages)}", module="net")
                 return messages
         except Exception as exc:  # noqa: BLE001
-            log(f"OneBot attempt failed at {base}: {exc}")
             errors.append(f"{base}: {exc}")
 
     proxy_messages = fetch_group_history_via_webui_proxy(cfg, webui_credential, errors)
@@ -540,14 +425,9 @@ def ensure_ob11_http_server(cfg: Config, webui_credential: str) -> dict[str, Any
 
     enabled = next((item for item in http_servers if item.get("enable")), None)
     if enabled:
-        log(
-            "Found enabled OB11 HTTP server "
-            f"{enabled.get('name', '(unnamed)')} on port {enabled.get('port')}."
-        )
         return enabled
 
     if cfg.onebot_base:
-        log("ONEBOT_BASE was provided explicitly; skipping OB11 HTTP auto-configuration.")
         return None
 
     candidate = {
@@ -575,7 +455,10 @@ def ensure_ob11_http_server(cfg: Config, webui_credential: str) -> dict[str, Any
         raise AutoPRError(f"OB11Config/SetConfig failed: {saved.get('message')}")
 
     time.sleep(1)
-    log(f"Enabled OB11 HTTP server {candidate['name']} on port {candidate['port']}.")
+    log(
+        f"已启用 OneBot HTTP：name={candidate['name']} port={candidate['port']}",
+        module="net",
+    )
     return candidate
 
 
@@ -605,7 +488,7 @@ def fetch_group_history_via_webui_proxy(
                 proxy_credential=webui_credential,
             )
             if messages:
-                print(f"Fetched group history via WebUI proxy from {base}.")
+                log(f"历史拉取成功：proxy={base} count={len(messages)}", module="net")
                 return messages
         except Exception as exc:  # noqa: BLE001
             errors.append(f"proxy {base}: {exc}")
@@ -723,10 +606,10 @@ def download_message_images(messages: list[dict[str, Any]], image_dir: Path) -> 
             safe_name = sanitize_image_name(file_name)
             image_dir.mkdir(parents=True, exist_ok=True)
             target = image_dir / safe_name
-            log(f"Downloading image {file_name} -> {target}.")
+            log(f"下载图片：{file_name}", module="chat")
             if download_binary(image_url, target):
                 image_map[file_name] = str(target)
-                log(f"Downloaded image {file_name}.")
+                log(f"图片已保存：{target.name}", module="chat")
     return image_map
 
 
@@ -742,7 +625,7 @@ def download_binary(url: str, target: Path, timeout: int = 30) -> bool:
             target.write_bytes(resp.read())
             return True
     except Exception as exc:  # noqa: BLE001
-        print(f"warning: failed to download image {url}: {exc}", file=sys.stderr)
+        log(f"图片下载失败：url={url} err={exc}", module="chat")
         return False
 
 
@@ -907,8 +790,10 @@ def run_claude(
     ]
     if cfg.claude_budget_usd:
         cmd.extend(["--max-budget-usd", cfg.claude_budget_usd])
-    log(f"Invoking Claude with repository access to {cfg.repo_dir.resolve()}.")
-    log(f"Claude timeout is set to {cfg.claude_timeout_seconds} seconds.")
+    prompt_preview = single_line(prompt, 160)
+    log(f"执行 claude -p {prompt_preview}", module="claude")
+    log(f"Claude 工作目录：{cfg.repo_dir.resolve()}", module="claude")
+    log(f"Claude 超时：{cfg.claude_timeout_seconds}s", module="claude")
     if capture_output:
         return run_cmd_capture(
             cmd,
@@ -928,11 +813,11 @@ def ensure_repo(repo_url: str, repo_dir: Path) -> None:
 
 
 def sync_repo(repo_dir: Path) -> None:
-    log("Syncing repository with remotes.")
+    log("同步仓库", module="git")
     run_cmd(["git", "fetch", "--all", "--prune"], cwd=repo_dir)
     run_cmd(["git", "checkout", "main"], cwd=repo_dir)
     run_cmd(["git", "pull", "--ff-only"], cwd=repo_dir)
-    log("Repository sync complete.")
+    log("仓库同步完成", module="git")
 
 
 def checkout_branch(repo_dir: Path, branch: str) -> None:
@@ -1001,10 +886,10 @@ def ensure_committed_and_pushed_to_fork(repo_dir: Path, repo_url: str) -> str:
     if has_changes(repo_dir):
         title = build_pr_title(repo_dir)
         commit_all(repo_dir, title)
-        log(f"Committed local changes with title: {title}")
+        log(f"已提交：{title}", module="git")
     else:
         title = current_commit_title(repo_dir)
-        log(f"Claude already committed changes with title: {title}")
+        log(f"检测到现有提交：{title}", module="git")
 
     branch = current_branch(repo_dir)
     login = gh_api_text(["user", "--jq", ".login"], repo_dir).strip()
@@ -1012,9 +897,9 @@ def ensure_committed_and_pushed_to_fork(repo_dir: Path, repo_url: str) -> str:
         raise AutoPRError("unable to determine authenticated GitHub login")
     push_remote = ensure_push_remote(repo_dir, repo_url, login)
     if branch_pushed_to_remote(repo_dir, push_remote, branch):
-        log(f"Branch {branch} is already present on remote {push_remote}.")
+        log(f"已存在远端分支：{push_remote}/{branch}", module="git")
     else:
-        log(f"Branch {branch} is not yet on remote {push_remote}; pushing now.")
+        log(f"推送分支：{push_remote}/{branch}", module="git")
         run_cmd(["git", "push", "-u", push_remote, branch], cwd=repo_dir)
     return title
 
@@ -1059,9 +944,9 @@ def create_pr(repo_dir: Path, branch: str, title: str, cfg: Config, chat_path: P
 
     push_remote = ensure_push_remote(repo_dir, cfg.repo_url, login)
     if branch_pushed_to_remote(repo_dir, push_remote, branch):
-        log(f"Branch {branch} is already present on remote {push_remote}; skipping push.")
+        log(f"已存在远端分支：{push_remote}/{branch}", module="pr")
     else:
-        log(f"Pushing branch {branch} to remote {push_remote}.")
+        log(f"推送分支：{push_remote}/{branch}", module="pr")
         run_cmd(["git", "push", "-u", push_remote, branch], cwd=repo_dir)
 
     upstream_owner, upstream_repo = parse_github_repo(cfg.repo_url)
@@ -1082,7 +967,7 @@ def create_pr(repo_dir: Path, branch: str, title: str, cfg: Config, chat_path: P
         ],
         repo_dir,
     )
-    log(f"Created PR against {upstream_owner}/{upstream_repo} from {login}:{branch}.")
+    log(f"已创建 PR：{upstream_owner}/{upstream_repo} <- {login}:{branch}", module="pr")
 
 
 def build_pr_body(cfg: Config, chat_path: Path) -> str:
@@ -1164,7 +1049,7 @@ def gh_api_json(args: list[str], cwd: Path) -> dict[str, Any]:
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None, timeout: int | None = None) -> None:
-    print("+ " + " ".join(cmd))
+    log(f"执行命令：{format_cmd(cmd)}", module="cmd")
     subprocess.run(cmd, cwd=cwd, check=True, timeout=timeout)
 
 
@@ -1174,7 +1059,7 @@ def run_cmd_capture(
     timeout: int | None = None,
     response_file: Path | None = None,
 ) -> str:
-    print("+ " + " ".join(cmd))
+    log(f"执行命令：{format_cmd(cmd)}", module="cmd")
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -1213,8 +1098,20 @@ def run_cmd_capture(
     return "".join(chunks)
 
 
-def log(message: str) -> None:
-    print(f"[naosi-autopr] {message}", flush=True)
+def log(message: str, module: str = "core") -> None:
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"[naosi-autopr][{module}][{now}] {message}", flush=True)
+
+
+def single_line(text: str, limit: int = 120) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def format_cmd(cmd: list[str], limit: int = 200) -> str:
+    return single_line(" ".join(cmd), limit)
 
 
 def command_exists(name: str) -> bool:
