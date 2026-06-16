@@ -779,7 +779,8 @@ def build_claude_prompt(
         - Be willing to add a small amount of scaffolding for future completion if it is clearly aligned with the project and grounded in the chat evidence.
         - Do not reject an update only because it feels too thin for formal documentation or is supported by only a single concrete data point; these small points are acceptable inputs and are often good seeds for future documentation growth.
         - Actively consider using these small points to introduce a small new page, index entry, category, or structural refactor when you believe the topic is likely to grow later or gain parallel sibling entries; this kind of early scaffolding is encouraged.
-        - If an existing page is getting too crowded, too mixed in topic, or no longer fits its title well, actively consider splitting it into multiple topic pages instead of continuing to append more content to the same page.
+        - Actively refactor page structure when a page keeps accumulating content and starts drifting away from the intent signaled by its title, or when a reader opening the page may reasonably feel "this is not actually the page I wanted".
+        - In those cases, split the page into clearer topic pages instead of continuing to append everything to one place. For example, a page like "选课指南" may deserve separate pages for "选课系统" and "选课思路" under "选课" once the content grows in different directions.
         - It is encouraged to create a dedicated new page even for only one or two useful sentences when that gives the topic a clearer long-term home, but make sure users can still reach it through clear entry points such as nearby links, index pages, or category pages.
         - If the chat export does not contain enough actionable information, create a short markdown note under docs or the closest existing documentation area explaining that no actionable update was found, instead of inventing content.
 
