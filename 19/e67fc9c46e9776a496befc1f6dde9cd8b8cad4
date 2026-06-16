@@ -1,0 +1,26 @@
+src/naosi_autopr/__init__.py
+  s_0838f3714c8e4f::t_695d74028df7ed 783
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "19e67fc9c46e9776a496befc1f6dde9cd8b8cad4",
+  "prompts": {},
+  "humans": {
+    "h_70d977c6323fbc": {
+      "author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_0838f3714c8e4f": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-a057b22b-dce8-44d2-8f71-97d248d4cc63",
+        "model": "default"
+      },
+      "human_author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
