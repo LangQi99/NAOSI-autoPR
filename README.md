@@ -22,11 +22,16 @@ In daemon mode it:
 
 1. Polls the QQ group regularly.
 2. Tracks newly observed messages.
-3. Triggers a Claude run whenever `80` new messages have accumulated.
-4. Uses a 1-hour Claude timeout by default in daemon mode.
-5. Overwrites `response.txt` with the latest Claude output.
-6. Serves that file over HTTP on port `6798`.
-7. Persists daemon progress and the pending message buffer to `daemon-state.json`, so restarts can resume without rebuilding the buffer from zero.
+3. Replays newly observed messages through three summary buffers: `1x`, `4x`, and `16x`.
+4. Downloads images from each newly observed message immediately into `runs/image-cache`.
+5. Keeps cached images for at most 30 days.
+6. Triggers Claude whenever a buffer reaches `DAEMON_TRIGGER_COUNT`, `4 * DAEMON_TRIGGER_COUNT`, or `16 * DAEMON_TRIGGER_COUNT` messages.
+7. On first startup, treats fetched history as a backtest stream and simulates the same three buffers in chronological order.
+8. Uses a 1-hour Claude timeout by default in daemon mode.
+9. Overwrites `response.txt` with the latest Claude output.
+10. Serves that file over HTTP on port `6798`.
+11. Pushes each changed daemon branch to your fork and creates an upstream PR unless `--no-pr` is set.
+12. Persists daemon progress and all pending buffers to `daemon-state.json`, so restarts can resume without rebuilding the buffers from zero.
 
 Typical usage:
 
@@ -49,12 +54,13 @@ Then read the latest response from:
 It:
 
 1. Polls open PRs in `NAOSI-DLUT/dut-manual` whose titles start with `[AUTO]`.
-2. Checks for newly arrived issue comments and review bodies every 10 minutes.
+2. Checks for newly arrived PR issue comments, review bodies, and review line comments every 10 minutes.
 3. Persists seen-comment state so it does not reprocess the same feedback.
 4. Uses a separate local checkout, by default `repos/dut-manual-cr`.
 5. Can point that isolated checkout at a separate Git URL via `PR_COMMENT_TARGET_REPO_URL`.
-6. Lets Claude read the PR URL, PR description, and the new comment, then make changes in that separate checkout.
-7. Writes Claude output to `pr-comment-response.txt`.
+6. Fetches and checks out the PR head branch from the PR author's fork before Claude runs.
+7. Lets Claude read the PR URL, PR description, and the new comment, then make changes in that separate checkout.
+8. Writes Claude output to `pr-comment-response.txt`.
 
 Typical usage:
 

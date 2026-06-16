@@ -754,12 +754,13 @@ def build_claude_prompt(
 
         Task:
         - Read the chat export and identify concrete documentation updates requested or implied by the group discussion.
-        - If the chat export references local image paths, inspect those images when they are relevant to understanding the discussion.
+        - If the chat export references local image paths, inspect those images when they are relevant to understanding the discussion. Those images are available locally and can be read directly.
         {previous_chat_instruction}
         - Edit this repository only where the chat evidence supports a change.
         - Keep changes focused and reviewable.
         - It is acceptable to make no repository changes if the chat does not contain anything clearly valuable enough to document.
-        - If you make repository changes, create a local git commit for them.
+        - If there is nothing worth changing or no useful operation to perform, do not create a git commit.
+        - If you make repository changes, create a local git commit for them. Do not create a commit when you don want to push.
         - If you create a git commit, push the current branch to the user's fork remote `fork`.
         - Run the relevant verification command if the repository provides one.
         - Do not create a PR; the outer automation will handle PR creation.
@@ -774,6 +775,8 @@ def build_claude_prompt(
         - Prefer the smallest correct edit that captures the concrete guidance from the chat.
         - Do not duplicate information that is already documented in the repository.
         - If existing content is inaccurate, prefer correcting it in place instead of writing a parallel rewrite.
+        - You may proactively improve structure when it helps future maintenance: small refactors, clearer organization, new index pages, and lightweight categorization are allowed even if the current evidence only justifies a modest content change.
+        - Be willing to add a small amount of scaffolding for future completion if it is clearly aligned with the project and grounded in the chat evidence.
         - If the chat export does not contain enough actionable information, create a short markdown note under docs or the closest existing documentation area explaining that no actionable update was found, instead of inventing content.
 
         Only add content that is directly supported by the chat export.
