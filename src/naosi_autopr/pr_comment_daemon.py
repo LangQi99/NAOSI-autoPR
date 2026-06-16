@@ -256,8 +256,10 @@ def build_pr_comment_prompt(
         "- Treat https://github.com/LangQi99/dut-manual as the user's fork that should receive pushes.\n"
         "- You may proactively improve nearby structure when it helps address the feedback well: small refactors, clearer organization, new index pages, and lightweight categorization are allowed even for modest comment-driven changes.\n"
         "- Be willing to add small amounts of maintainable scaffolding that make future completion easier, as long as it stays aligned with the repository and the review feedback.\n"
-        "- Do not reject a change only because it feels too thin for formal documentation or is supported by only a single concrete data point.\n"
-        "- If the feedback suggests a topic that is likely to expand later or gain parallel sibling entries, it is acceptable to add a small new page, index entry, category, or structural refactor now so future additions have a clear place to go.\n"
+        "- Do not reject a change only because it feels too thin for formal documentation or is supported by only a single concrete data point; these small points are acceptable inputs and are often good seeds for future documentation growth.\n"
+        "- Actively consider using these small points to add a small new page, index entry, category, or structural refactor when the feedback suggests a topic that is likely to expand later or gain parallel sibling entries; this kind of early scaffolding is encouraged.\n"
+        "- If an existing page is getting too crowded, too mixed in topic, or no longer fits its title well, actively consider splitting it into multiple topic pages instead of continuing to append more content to the same page.\n"
+        "- It is encouraged to create a dedicated new page even for only one or two useful sentences when that gives the topic a clearer long-term home, but make sure users can still reach it through clear entry points such as nearby links, index pages, or category pages.\n"
         "- You can also comment to show your insights but must start with [AUTO].\n"
         "- Do not create a PR.\n"
     )

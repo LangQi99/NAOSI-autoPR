@@ -777,8 +777,10 @@ def build_claude_prompt(
         - If existing content is inaccurate, prefer correcting it in place instead of writing a parallel rewrite.
         - You may proactively improve structure when it helps future maintenance: small refactors, clearer organization, new index pages, and lightweight categorization are allowed even if the current evidence only justifies a modest content change.
         - Be willing to add a small amount of scaffolding for future completion if it is clearly aligned with the project and grounded in the chat evidence.
-        - Do not reject an update only because it feels too thin for formal documentation or is supported by only a single concrete data point.
-        - If you believe the topic is likely to grow later or to gain parallel sibling entries, it is acceptable to introduce a small new page, index entry, category, or structural refactor now so the repository has a place for future expansion.
+        - Do not reject an update only because it feels too thin for formal documentation or is supported by only a single concrete data point; these small points are acceptable inputs and are often good seeds for future documentation growth.
+        - Actively consider using these small points to introduce a small new page, index entry, category, or structural refactor when you believe the topic is likely to grow later or gain parallel sibling entries; this kind of early scaffolding is encouraged.
+        - If an existing page is getting too crowded, too mixed in topic, or no longer fits its title well, actively consider splitting it into multiple topic pages instead of continuing to append more content to the same page.
+        - It is encouraged to create a dedicated new page even for only one or two useful sentences when that gives the topic a clearer long-term home, but make sure users can still reach it through clear entry points such as nearby links, index pages, or category pages.
         - If the chat export does not contain enough actionable information, create a short markdown note under docs or the closest existing documentation area explaining that no actionable update was found, instead of inventing content.
 
         Only add content that is directly supported by the chat export.
