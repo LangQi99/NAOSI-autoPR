@@ -1,0 +1,16 @@
+src/naosi_autopr/__init__.py
+  h_70d977c6323fbc 757,762-763,778-779
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "643ced92d3786042adbdde4f772cc44ccc645055",
+  "prompts": {},
+  "humans": {
+    "h_70d977c6323fbc": {
+      "author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
