@@ -362,6 +362,7 @@ def run_daemon(cfg: Config) -> None:
 def run_pr_comment_daemon(cfg: Config) -> None:
     hooks = PRCommentHooks(
         ensure_repo=ensure_repo,
+        hard_clean_repo=hard_clean_repo,
         sync_repo=sync_repo,
         checkout_pr_head=checkout_pr_head,
         run_claude=run_claude,
@@ -838,6 +839,12 @@ def sync_repo(repo_dir: Path) -> None:
     run_cmd(["git", "checkout", "main"], cwd=repo_dir)
     run_cmd(["git", "reset", "--hard", "origin/main"], cwd=repo_dir)
     log("已对齐 origin/main", module="git")
+
+
+def hard_clean_repo(repo_dir: Path) -> None:
+    log("强制清理工作区", module="git")
+    run_cmd(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
+    run_cmd(["git", "clean", "-fd"], cwd=repo_dir)
 
 
 def checkout_branch(repo_dir: Path, branch: str) -> None:

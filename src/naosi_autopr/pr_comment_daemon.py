@@ -15,6 +15,7 @@ MAX_COMMENT_BODY_LENGTH = 4000
 @dataclass(frozen=True)
 class PRCommentHooks:
     ensure_repo: Callable[[str, Path], None]
+    hard_clean_repo: Callable[[Path], None]
     sync_repo: Callable[[Path], None]
     checkout_pr_head: Callable[[Path, str, str, str], None]
     run_claude: Callable[..., str]
@@ -188,6 +189,7 @@ def handle_pr_events(
 
     repo_url = cfg.pr_comment_target_repo_url
     hooks.ensure_repo(repo_url, cfg.pr_comment_local_repo)
+    hooks.hard_clean_repo(cfg.pr_comment_local_repo)
     hooks.sync_repo(cfg.pr_comment_local_repo)
     hooks.checkout_pr_head(cfg.pr_comment_local_repo, repo_url, head_owner, head_branch)
 
