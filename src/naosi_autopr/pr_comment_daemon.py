@@ -104,9 +104,22 @@ def collect_new_comment_events(
     seen_ids = set(state.setdefault("seen_comment_ids", []))
     for pr in prs:
         pr_number = int(pr["number"])
-        review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
-        review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
+        issue_comments, review_comments, review_line_comments = fetch_pr_comment_payloads(
+            repo,
+            pr_number,
+        )
         resolved_review_comment_ids = get_resolved_review_comment_ids(repo, pr_number)
+        for comment in issue_comments:
+            comment_id = f"issue-comment:{comment['id']}"
+            if comment_id in seen_ids or is_ignorable_comment(comment):
+                continue
+            events.append(
+                {
+                    "pr": pr,
+                    "comment_type": "issue_comment",
+                    "comment": comment,
+                }
+            )
         for review in review_comments:
             review_body = (review.get("body") or "").strip()
             if not review_body:
@@ -294,6 +307,8 @@ def mark_events_seen(state: dict[str, Any], events: list[dict[str, Any]]) -> Non
 def event_identity(event: dict[str, Any]) -> str:
     comment = event.get("comment") or {}
     comment_type = str(event.get("comment_type") or "")
+    if comment_type == "issue_comment":
+        return f"issue-comment:{comment['id']}"
     if comment_type == "review":
         return f"review:{comment['id']}"
     if comment_type == "review_comment":
@@ -515,25 +530,39 @@ def write_text(path: Path, content: str) -> None:
 def gh_api_json(path: str) -> list[dict[str, Any]]:
     import subprocess
 
-    result = subprocess.run(
-        ["gh", "api", path, "--paginate"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
+    result = run_gh_api_with_retry(["gh", "api", path, "--paginate"])
     return json.loads(result.stdout)
 
 
 def gh_graphql(args: list[str]) -> dict[str, Any]:
+    result = run_gh_api_with_retry(["gh", "api", "graphql", *args])
+    return json.loads(result.stdout)
+
+
+def run_gh_api_with_retry(cmd: list[str], attempts: int = 3) -> Any:
     import subprocess
 
-    result = subprocess.run(
-        ["gh", "api", "graphql", *args],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-    return json.loads(result.stdout)
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return subprocess.run(
+                cmd,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            stderr = (exc.stderr or "").strip()
+            if attempt >= attempts:
+                raise RuntimeError(
+                    f"{cmd!r} failed after {attempts} attempts: {stderr or exc}"
+                ) from exc
+            time.sleep(attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{cmd!r} failed unexpectedly")
 
 
 def get_authenticated_login(local_repo: Path, hooks: PRCommentHooks) -> str:
@@ -549,11 +578,22 @@ def initialize_seen_comments(
     state: dict[str, Any],
     log: Callable[[str], None],
 ) -> None:
-    seen_ids = set(state.setdefault("seen_comment_ids", []))
+    existing_seen_ids = list(state.setdefault("seen_comment_ids", []))
+    seen_ids = set(existing_seen_ids)
+    pending_seen_ids = existing_seen_ids[:]
     for pr in prs:
         pr_number = int(pr["number"])
-        review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
-        review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
+        issue_comments, review_comments, review_line_comments = fetch_pr_comment_payloads(
+            repo,
+            pr_number,
+        )
+        for comment in issue_comments:
+            comment_id = f"issue-comment:{comment['id']}"
+            if is_ignorable_comment(comment):
+                continue
+            if comment_id not in seen_ids:
+                pending_seen_ids.append(comment_id)
+                seen_ids.add(comment_id)
         for review in review_comments:
             review_body = (review.get("body") or "").strip()
             if not review_body:
@@ -562,20 +602,31 @@ def initialize_seen_comments(
             if is_ignorable_comment(review):
                 continue
             if review_id not in seen_ids:
-                state["seen_comment_ids"].append(review_id)
+                pending_seen_ids.append(review_id)
                 seen_ids.add(review_id)
         for comment in review_line_comments:
             comment_id = f"review-comment:{comment['id']}"
             if is_ignorable_comment(comment):
                 continue
             if comment_id not in seen_ids:
-                state["seen_comment_ids"].append(comment_id)
+                pending_seen_ids.append(comment_id)
                 seen_ids.add(comment_id)
+    state["seen_comment_ids"] = pending_seen_ids
     state["initialized"] = True
     log(
         f"首启基线完成：open_pr={len(prs)} seen_comments={len(state['seen_comment_ids'])}",
         module="pr-comment",
     )
+
+
+def fetch_pr_comment_payloads(
+    repo: str,
+    pr_number: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    issue_comments = gh_api_json(f"repos/{repo}/issues/{pr_number}/comments")
+    review_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/reviews")
+    review_line_comments = gh_api_json(f"repos/{repo}/pulls/{pr_number}/comments")
+    return issue_comments, review_comments, review_line_comments
 
 
 def truncate_text(text: str, limit: int = 120) -> str:
