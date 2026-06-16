@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "41820d0fe7ae36a9e3c3e6c4102a0d2dc470a45c",
+  "prompts": {},
+  "humans": {
+    "h_70d977c6323fbc": {
+      "author": "LangQi99 <2032771946@qq.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
