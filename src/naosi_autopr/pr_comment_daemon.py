@@ -256,6 +256,8 @@ def build_pr_comment_prompt(
         "- Treat https://github.com/LangQi99/dut-manual as the user's fork that should receive pushes.\n"
         "- You may proactively improve nearby structure when it helps address the feedback well: small refactors, clearer organization, new index pages, and lightweight categorization are allowed even for modest comment-driven changes.\n"
         "- Be willing to add small amounts of maintainable scaffolding that make future completion easier, as long as it stays aligned with the repository and the review feedback.\n"
+        "- Do not reject a change only because it feels too thin for formal documentation or is supported by only a single concrete data point.\n"
+        "- If the feedback suggests a topic that is likely to expand later or gain parallel sibling entries, it is acceptable to add a small new page, index entry, category, or structural refactor now so future additions have a clear place to go.\n"
         "- You can also comment to show your insights but must start with [AUTO].\n"
         "- Do not create a PR.\n"
     )

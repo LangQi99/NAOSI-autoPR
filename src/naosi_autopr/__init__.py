@@ -777,6 +777,8 @@ def build_claude_prompt(
         - If existing content is inaccurate, prefer correcting it in place instead of writing a parallel rewrite.
         - You may proactively improve structure when it helps future maintenance: small refactors, clearer organization, new index pages, and lightweight categorization are allowed even if the current evidence only justifies a modest content change.
         - Be willing to add a small amount of scaffolding for future completion if it is clearly aligned with the project and grounded in the chat evidence.
+        - Do not reject an update only because it feels too thin for formal documentation or is supported by only a single concrete data point.
+        - If you believe the topic is likely to grow later or to gain parallel sibling entries, it is acceptable to introduce a small new page, index entry, category, or structural refactor now so the repository has a place for future expansion.
         - If the chat export does not contain enough actionable information, create a short markdown note under docs or the closest existing documentation area explaining that no actionable update was found, instead of inventing content.
 
         Only add content that is directly supported by the chat export.
